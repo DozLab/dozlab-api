@@ -1,0 +1,563 @@
+openapi: 3.0.3
+info:
+  title: Dozlab API
+  description: REST API for Dozlab learning platform microservice
+  version: 1.0.0
+  contact:
+    name: API Support
+    url: http://www.dozlab.io/support
+    email: support@dozlab.io
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Development server
+  - url: https://api.dozlab.io
+    description: Production server
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Check if the service is healthy
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  message:
+                    type: string
+                    example: "Dozlab Backend is healthy"
+
+  /api/v1/auth/register:
+    post:
+      summary: Register new user
+      description: Create a new user account
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRegistrationRequest'
+      responses:
+        '201':
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Bad request - validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: User already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/auth/login:
+    post:
+      summary: Login user
+      description: Authenticate user credentials
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserLoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/auth/refresh:
+    post:
+      summary: Refresh access token
+      description: Get new access token using refresh token
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - refresh_token
+              properties:
+                refresh_token:
+                  type: string
+                  example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      responses:
+        '200':
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Token refreshed successfully"
+                  tokens:
+                    $ref: '#/components/schemas/TokenPair'
+        '401':
+          description: Invalid refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/users/profile:
+    get:
+      summary: Get user profile
+      description: Get current authenticated user's profile
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User profile retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      summary: Update user profile
+      description: Update current authenticated user's profile
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          description: Profile updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/users/logout:
+    post:
+      summary: Logout user
+      description: Logout current authenticated user
+      tags:
+        - Users
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Logged out successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Logged out successfully"
+
+  /api/v1/lab-sessions:
+    post:
+      summary: Create lab session
+      description: Create a new lab session using Kubernetes CRD
+      tags:
+        - Lab Sessions
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LabSessionCreateRequest'
+      responses:
+        '201':
+          description: Lab session created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabSessionResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      summary: List lab sessions
+      description: Get list of user's lab sessions
+      tags:
+        - Lab Sessions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          description: Page number
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          description: Number of items per page
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Lab sessions retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lab_sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LabSessionResponse'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  limit:
+                    type: integer
+
+  /api/v1/lab-sessions/{id}:
+    get:
+      summary: Get lab session
+      description: Get specific lab session details
+      tags:
+        - Lab Sessions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Lab session ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Lab session retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabSessionResponse'
+        '404':
+          description: Lab session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete lab session
+      description: Delete a lab session
+      tags:
+        - Lab Sessions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Lab session ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Lab session deleted successfully
+        '404':
+          description: Lab session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/users:
+    get:
+      summary: List all users (Admin)
+      description: Get list of all users (admin only)
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          description: Page number
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          description: Number of items per page
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Users retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserResponse'
+                  total:
+                    type: integer
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    UserRegistrationRequest:
+      type: object
+      required:
+        - username
+        - email
+        - password
+        - first_name
+        - last_name
+      properties:
+        username:
+          type: string
+          example: "johndoe"
+        email:
+          type: string
+          format: email
+          example: "john@example.com"
+        password:
+          type: string
+          format: password
+          example: "StrongPassword123!"
+        first_name:
+          type: string
+          example: "John"
+        last_name:
+          type: string
+          example: "Doe"
+
+    UserLoginRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          example: "johndoe"
+        password:
+          type: string
+          format: password
+          example: "StrongPassword123!"
+
+    UserUpdateRequest:
+      type: object
+      properties:
+        first_name:
+          type: string
+          example: "John"
+        last_name:
+          type: string
+          example: "Doe"
+        email:
+          type: string
+          format: email
+          example: "john@example.com"
+
+    UserResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        username:
+          type: string
+          example: "johndoe"
+        email:
+          type: string
+          format: email
+          example: "john@example.com"
+        first_name:
+          type: string
+          example: "John"
+        last_name:
+          type: string
+          example: "Doe"
+        role:
+          type: string
+          enum: [student, instructor, admin]
+          example: "student"
+        is_active:
+          type: boolean
+          example: true
+        created_at:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+        last_login_at:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    TokenPair:
+      type: object
+      properties:
+        access_token:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        refresh_token:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+    AuthResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "User registered successfully"
+        user:
+          $ref: '#/components/schemas/UserResponse'
+        tokens:
+          $ref: '#/components/schemas/TokenPair'
+
+    LabSessionCreateRequest:
+      type: object
+      required:
+        - lab_id
+        - spec_version
+      properties:
+        lab_id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        spec_version:
+          type: string
+          example: "v1.0.0"
+
+    LabSessionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "lab-session-abc123"
+        lab_id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        user_id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+          example: "running"
+        created_at:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Invalid request format"
+        details:
+          type: string
+          example: "Missing required field: username"
+
+tags:
+  - name: Health
+    description: Health check endpoints
+  - name: Authentication
+    description: User authentication operations
+  - name: Users
+    description: User management operations
+  - name: Lab Sessions
+    description: Lab session management
+  - name: Admin
+    description: Administrative operations
