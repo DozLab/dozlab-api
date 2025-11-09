@@ -1,0 +1,203 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: labsessions.dozlab.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.13.0
+spec:
+  group: dozlab.io
+  names:
+    kind: LabSession
+    listKind: LabSessionList
+    plural: labsessions
+    shortNames:
+    - labsession
+    - ls
+    singular: labsession
+  scope: Namespaced
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: LabSession is the Schema for the labsessions API
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object.'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents.'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: LabSessionSpec defines the desired state of a lab session
+            properties:
+              config:
+                description: Config defines the lab configuration
+                properties:
+                  enableSSH:
+                    type: boolean
+                  enableTerminal:
+                    type: boolean
+                  enableVSCode:
+                    type: boolean
+                  vsCodePassword:
+                    type: string
+                type: object
+              customImages:
+                description: CustomImages allows overriding default container images
+                properties:
+                  initrdImage:
+                    type: string
+                  terminalImage:
+                    type: string
+                  vscodeImage:
+                    type: string
+                type: object
+              labId:
+                description: LabID is the unique lab identifier (optional)
+                type: string
+              resources:
+                description: Resources defines the compute resources for the lab
+                properties:
+                  cpu:
+                    type: string
+                  memory:
+                    type: string
+                  storage:
+                    type: string
+                type: object
+              rootfsUrl:
+                description: RootfsURL defines the custom rootfs image URL (optional)
+                type: string
+              sessionId:
+                description: SessionID is the unique session identifier
+                type: string
+              timeout:
+                description: Timeout defines the session timeout duration (e.g., "2h",
+                  "30m")
+                type: string
+              userId:
+                description: UserID is the unique identifier for the user
+                type: string
+            required:
+            - sessionId
+            - userId
+            type: object
+          status:
+            description: LabSessionStatus defines the observed state of a lab session
+            properties:
+              conditions:
+                description: Conditions represent the latest observations of the session's
+                  state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition
+                        transitioned from one status to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating
+                        details about the transition.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation
+                        that the condition was set based upon.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating
+                        the reason for the condition's last transition.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              endpoints:
+                additionalProperties:
+                  type: string
+                description: Endpoints contains the accessible service endpoints
+                type: object
+              lastTransitionTime:
+                description: LastTransitionTime is when the phase last changed
+                format: date-time
+                type: string
+              message:
+                description: Message provides human-readable status information
+                type: string
+              observedGeneration:
+                description: ObservedGeneration reflects the generation observed by
+                  the controller
+                format: int64
+                type: integer
+              phase:
+                description: Phase represents the current phase of the session
+                enum:
+                - Pending
+                - Creating
+                - Running
+                - Failed
+                - Terminating
+                - Terminated
+                type: string
+              podIP:
+                description: PodIP is the internal IP address of the pod
+                type: string
+              podName:
+                description: PodName is the name of the created pod
+                type: string
+              reason:
+                description: Reason provides a machine-readable status reason
+                type: string
+              serviceName:
+                description: ServiceName is the name of the created service
+                type: string
+              startTime:
+                description: StartTime is when the session started
+                format: date-time
+                type: string
+              vmIP:
+                description: VMIP is the calculated IP address of the VM
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Phase
+      type: string
+      jsonPath: .status.phase
+    - name: User
+      type: string
+      jsonPath: .spec.userId
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
