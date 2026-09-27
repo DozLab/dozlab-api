@@ -15,6 +15,7 @@ type sessionService struct {
 	eventBus EventBusService
 }
 
+// NewSessionService returns a SessionService backed by db that publishes session events to eventBus.
 func NewSessionService(db *database.Database, eventBus EventBusService) SessionService {
 	return &sessionService{
 		db:       db,
