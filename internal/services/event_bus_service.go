@@ -8,20 +8,46 @@ import (
 	"dozlab-backend/internal/websocket"
 )
 
+// EventTransport is the pub/sub transport behind EventBusService
+// (messaging.RabbitEventBus; websocket.RedisEventBus also satisfies it).
+type EventTransport interface {
+	Publish(ctx context.Context, event *websocket.Event) error
+	RegisterHandler(eventType websocket.EventType, handler websocket.EventHandler)
+	Subscribe(ctx context.Context, eventTypes ...websocket.EventType) error
+}
+
+// EventStore keeps events that have a TTL so they can be read back by ID.
+type EventStore interface {
+	StoreEvent(ctx context.Context, event *websocket.Event) error
+	GetEvent(ctx context.Context, eventID string) (*websocket.Event, error)
+}
+
 type eventBusService struct {
-	redisEventBus *websocket.RedisEventBus
+	transport EventTransport
+	store     EventStore
 }
 
 // NewEventBusService creates a new event bus service with proper error handling
-func NewEventBusService(redisEventBus *websocket.RedisEventBus) EventBusService {
+func NewEventBusService(transport EventTransport, store EventStore) EventBusService {
 	return &eventBusService{
-		redisEventBus: redisEventBus,
+		transport: transport,
+		store:     store,
 	}
+}
+
+// publish stores the event (if it has a TTL) and publishes it
+func (s *eventBusService) publish(ctx context.Context, event interface{}) error {
+	e := websocket.ToEvent(event)
+	if err := s.store.StoreEvent(ctx, e); err != nil {
+		// Non-fatal: the event is still published
+		log.Printf("Warning: failed to store event %s: %v", e.ID, err)
+	}
+	return s.transport.Publish(ctx, e)
 }
 
 // PublishEvent publishes an event with non-blocking error handling
 func (s *eventBusService) PublishEvent(ctx context.Context, event interface{}) error {
-	if err := s.redisEventBus.PublishEvent(ctx, event); err != nil {
+	if err := s.publish(ctx, event); err != nil {
 		// Log error but don't halt operations for non-critical events
 		log.Printf("Warning: Failed to publish non-critical event: %v", err)
 		return nil // Return nil to continue operations - this is intentional for non-critical events
@@ -34,7 +60,7 @@ func (s *eventBusService) PublishCriticalEvent(ctx context.Context, event interf
 	// Add retry logic for critical events
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
-		if err := s.redisEventBus.PublishEvent(ctx, event); err != nil {
+		if err := s.publish(ctx, event); err != nil {
 			log.Printf("Critical event publishing attempt %d failed: %v", i+1, err)
 			if i == maxRetries-1 {
 				// Return error for critical events to halt operations
@@ -56,7 +82,7 @@ func (s *eventBusService) PublishCriticalEvent(ctx context.Context, event interf
 
 // RegisterHandler registers an event handler
 func (s *eventBusService) RegisterHandler(eventType string, handler func(ctx context.Context, event interface{}) error) {
-	s.redisEventBus.RegisterHandler(websocket.EventType(eventType), func(ctx context.Context, event *websocket.Event) error {
+	s.transport.RegisterHandler(websocket.EventType(eventType), func(ctx context.Context, event *websocket.Event) error {
 		return handler(ctx, event)
 	})
 }
@@ -69,12 +95,12 @@ func (s *eventBusService) Subscribe(ctx context.Context, eventTypes []string) er
 		wsEventTypes[i] = websocket.EventType(et)
 	}
 	
-	return s.redisEventBus.Subscribe(ctx, wsEventTypes...)
+	return s.transport.Subscribe(ctx, wsEventTypes...)
 }
 
 // GetEvent retrieves a stored event by ID
 func (s *eventBusService) GetEvent(ctx context.Context, eventID string) (interface{}, error) {
-	return s.redisEventBus.GetEvent(ctx, eventID)
+	return s.store.GetEvent(ctx, eventID)
 }
 
 // ListEvents lists events with filters

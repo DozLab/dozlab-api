@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"time"
@@ -24,6 +25,14 @@ type RedisConfig struct {
 	Port string
 }
 
+// RabbitMQConfig holds the RabbitMQ event bus settings
+type RabbitMQConfig struct {
+	URL        string        // RABBITMQ_URL, required
+	Prefetch   int           // RABBITMQ_PREFETCH: unacked deliveries per consumer
+	MaxRetries int           // RABBITMQ_MAX_RETRIES: handler attempts after the first before a message goes to the DLQ
+	RetryDelay time.Duration // RABBITMQ_RETRY_DELAY: how long a failed message waits in the retry queue
+}
+
 // Config holds the API service configuration
 type Config struct {
 	ServerPort string
@@ -31,6 +40,7 @@ type Config struct {
 
 	Database DatabaseConfig
 	Redis    RedisConfig
+	RabbitMQ RabbitMQConfig
 
 	// Redis event bus settings
 	RedisAddr     string
@@ -67,11 +77,18 @@ func Load() (*Config, error) {
 			Host: os.Getenv("REDIS_HOST"),
 			Port: getEnv("REDIS_PORT", "6379"),
 		},
+		RabbitMQ: RabbitMQConfig{
+			URL: os.Getenv("RABBITMQ_URL"),
+		},
 		RedisAddr:           os.Getenv("REDIS_ADDR"),
 		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
 		WebSocketServiceURL: os.Getenv("WEBSOCKET_SERVICE_URL"),
 		ExaminerServiceURL:  os.Getenv("EXAMINER_SERVICE_URL"),
 		WorkflowServiceURL:  os.Getenv("WORKFLOW_SERVICE_URL"),
+	}
+
+	if cfg.RedisAddr == "" && cfg.Redis.Host != "" {
+		cfg.RedisAddr = net.JoinHostPort(cfg.Redis.Host, cfg.Redis.Port)
 	}
 
 	var err error
@@ -88,6 +105,15 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.TaskTimeout, err = getEnvDuration("TASK_TIMEOUT", 5*time.Minute); err != nil {
+		return nil, err
+	}
+	if cfg.RabbitMQ.Prefetch, err = getEnvInt("RABBITMQ_PREFETCH", 10); err != nil {
+		return nil, err
+	}
+	if cfg.RabbitMQ.MaxRetries, err = getEnvInt("RABBITMQ_MAX_RETRIES", 5); err != nil {
+		return nil, err
+	}
+	if cfg.RabbitMQ.RetryDelay, err = getEnvDuration("RABBITMQ_RETRY_DELAY", 10*time.Second); err != nil {
 		return nil, err
 	}
 
