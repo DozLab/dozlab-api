@@ -1,6 +1,7 @@
 package container
 
 import (
+	"context"
 	"errors"
 	"net/url"
 	"strconv"
@@ -49,6 +50,7 @@ func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.I
 
 	// Initialize WebSocket components
 	wsManager := websocket.NewManager()
+	go wsManager.Start()
 	wsService := websocket.NewSessionService(wsManager)
 
 	// Create validation service
@@ -97,6 +99,21 @@ func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.I
 	}
 
 	return container, nil
+}
+
+// StartEventConsumers subscribes this service's consumers to the event bus:
+// notifications and LabSession phase changes (from dozlab-controller) go to the
+// users' WebSocket connections. Each replica holds its own connections, so they
+// use this process's instance queue (every replica gets every event) rather
+// than the shared group queue.
+func (c *Container) StartEventConsumers(ctx context.Context) error {
+	c.RabbitEventBus.RegisterHandler(websocket.EventNotification, func(ctx context.Context, e *websocket.Event) error {
+		return c.WSManager.HandleNotificationEvent(ctx, e)
+	})
+	c.RabbitEventBus.RegisterHandler(websocket.EventLabSessionPhaseChanged, func(ctx context.Context, e *websocket.Event) error {
+		return c.WSManager.HandleLabSessionPhaseEvent(ctx, e)
+	})
+	return c.RabbitEventBus.SubscribeInstance(ctx, websocket.EventNotification, websocket.EventLabSessionPhaseChanged)
 }
 
 // redisURL returns cfg.Redis.URL, or builds one from RedisAddr/RedisPassword/RedisDB

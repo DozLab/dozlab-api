@@ -44,7 +44,7 @@ func newTestBus(t *testing.T, group string, maxRetries int) *RabbitEventBus {
 	}
 	t.Cleanup(func() {
 		bus.Close()
-		deleteQueues(t, QueueName(group), RetryQueueName(group))
+		deleteQueues(t, QueueName(group), RetryQueueName(group), bus.InstanceQueue())
 	})
 	return bus
 }
@@ -208,5 +208,108 @@ func TestRabbitReconnects(t *testing.T) {
 		t.Error("expected a new connection after the drop")
 	}
 	// The consumer restarts on the new connection and receives the event.
+	waitFor(t, 10*time.Second, func() bool { return calls.Load() >= 1 })
+}
+
+// Instances of one group share the group queue (each event reaches one of
+// them) but each gets every event on its instance queue.
+func TestRabbitInstanceQueuesFanOut(t *testing.T) {
+	group := uniqueName("it-fanout")
+	shared := websocket.EventType(uniqueName("test.shared"))
+	fanout := websocket.EventType(uniqueName("test.fanout"))
+	buses := []*RabbitEventBus{newTestBus(t, group, 1), newTestBus(t, group, 1)}
+	if buses[0].InstanceQueue() == buses[1].InstanceQueue() {
+		t.Fatalf("instances share queue %s", buses[0].InstanceQueue())
+	}
+
+	var sharedCalls, fanoutCalls [2]atomic.Int32
+	for i, bus := range buses {
+		i := i
+		bus.RegisterHandler(shared, func(ctx context.Context, e *websocket.Event) error { sharedCalls[i].Add(1); return nil })
+		bus.RegisterHandler(fanout, func(ctx context.Context, e *websocket.Event) error { fanoutCalls[i].Add(1); return nil })
+		if err := bus.Subscribe(context.Background(), shared); err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+		if err := bus.SubscribeInstance(context.Background(), fanout); err != nil {
+			t.Fatalf("SubscribeInstance: %v", err)
+		}
+	}
+
+	const n = 4
+	for i := 0; i < n; i++ {
+		for _, typ := range []websocket.EventType{shared, fanout} {
+			if err := buses[0].Publish(context.Background(), &websocket.Event{ID: fmt.Sprintf("%s-%d", typ, i), Type: typ}); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+		}
+	}
+
+	waitFor(t, 10*time.Second, func() bool {
+		return fanoutCalls[0].Load() == n && fanoutCalls[1].Load() == n &&
+			sharedCalls[0].Load()+sharedCalls[1].Load() == n
+	})
+	time.Sleep(300 * time.Millisecond) // nothing extra arrives
+	if got := sharedCalls[0].Load() + sharedCalls[1].Load(); got != n {
+		t.Errorf("shared events handled %d times, want %d (once each)", got, n)
+	}
+	if fanoutCalls[0].Load() != n || fanoutCalls[1].Load() != n {
+		t.Errorf("fan-out calls = %d, %d; want %d each", fanoutCalls[0].Load(), fanoutCalls[1].Load(), n)
+	}
+}
+
+// The instance queue is a non-durable classic queue that expires without a consumer.
+func TestRabbitInstanceQueueDeclaration(t *testing.T) {
+	group := uniqueName("it-instance")
+	eventType := websocket.EventType(uniqueName("test.instance"))
+	bus := newTestBus(t, group, 1)
+	if err := bus.SubscribeInstance(context.Background(), eventType); err != nil {
+		t.Fatalf("SubscribeInstance: %v", err)
+	}
+
+	conn, err := amqp.Dial(rabbitURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+	// A passive declare fails (and closes the channel) if the queue is missing;
+	// a redeclare with the same arguments succeeds only if they match.
+	if _, err := ch.QueueDeclarePassive(bus.InstanceQueue(), false, false, false, false, nil); err != nil {
+		t.Fatalf("instance queue missing: %v", err)
+	}
+	if err := declareInstance(ch, bus.InstanceQueue(), []string{string(eventType)}); err != nil {
+		t.Errorf("instance queue has different arguments: %v", err)
+	}
+}
+
+// The instance consumer resumes after a connection drop, on the same queue.
+func TestRabbitInstanceConsumerReconnects(t *testing.T) {
+	group := uniqueName("it-instance-reconnect")
+	eventType := websocket.EventType(uniqueName("test.instance.reconnect"))
+	bus := newTestBus(t, group, 1)
+
+	var calls atomic.Int32
+	bus.RegisterHandler(eventType, func(ctx context.Context, e *websocket.Event) error {
+		calls.Add(1)
+		return nil
+	})
+	if err := bus.SubscribeInstance(context.Background(), eventType); err != nil {
+		t.Fatalf("SubscribeInstance: %v", err)
+	}
+
+	bus.connMu.Lock()
+	old := bus.conn
+	bus.connMu.Unlock()
+	if err := old.Close(); err != nil {
+		t.Fatalf("close connection: %v", err)
+	}
+
+	waitFor(t, 10*time.Second, func() bool {
+		return bus.Publish(context.Background(), &websocket.Event{ID: "it-instance-reconnect", Type: eventType}) == nil
+	})
 	waitFor(t, 10*time.Second, func() bool { return calls.Load() >= 1 })
 }

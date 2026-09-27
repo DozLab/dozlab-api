@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"dozlab-backend/internal/middleware"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -19,6 +21,8 @@ var upgrader = websocket.Upgrader{
 		// In production, implement proper CORS checking
 		return true
 	},
+	// Browsers send ["dozlab.bearer", <JWT>]; only the first is echoed back
+	Subprotocols: []string{middleware.WebSocketSubprotocol},
 }
 
 // Message types for WebSocket communication
@@ -60,6 +64,11 @@ type NotificationMessage struct {
 	Title   string `json:"title"`
 	Message string `json:"message"`
 	Type    string `json:"type"` // info, success, warning, error
+
+	// Set for notifications that came from the event bus
+	ID       string      `json:"id,omitempty"`
+	Data     interface{} `json:"data,omitempty"`
+	SenderID string      `json:"sender_id,omitempty"`
 }
 
 // Client represents a WebSocket client connection
@@ -207,9 +216,16 @@ func (m *Manager) broadcastMessage(message Message) {
 		case client.Send <- message:
 		default:
 			// Client's send channel is blocked, unregister it
-			m.unregister <- client
+			m.unregisterLater(client)
 		}
 	}
+}
+
+// unregisterLater unregisters a client without blocking. Callers hold m.mutex
+// (and broadcastMessage runs on the Start goroutine that reads m.unregister),
+// so a direct send on m.unregister would deadlock.
+func (m *Manager) unregisterLater(client *Client) {
+	go func() { m.unregister <- client }()
 }
 
 // SendToUser sends a message to all connections of a specific user
@@ -222,7 +238,7 @@ func (m *Manager) SendToUser(userID string, message Message) {
 			select {
 			case client.Send <- message:
 			default:
-				m.unregister <- client
+				m.unregisterLater(client)
 			}
 		}
 	}
