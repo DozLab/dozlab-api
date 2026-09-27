@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"time"
@@ -72,6 +73,10 @@ func Load() (*Config, error) {
 		WebSocketServiceURL: os.Getenv("WEBSOCKET_SERVICE_URL"),
 		ExaminerServiceURL:  os.Getenv("EXAMINER_SERVICE_URL"),
 		WorkflowServiceURL:  os.Getenv("WORKFLOW_SERVICE_URL"),
+	}
+
+	if cfg.RedisAddr == "" && cfg.Redis.Host != "" {
+		cfg.RedisAddr = net.JoinHostPort(cfg.Redis.Host, cfg.Redis.Port)
 	}
 
 	var err error

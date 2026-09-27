@@ -101,22 +101,47 @@ DozLab uses a **Kubernetes sidecar pattern** with microservice API managing mult
 ## 📋 Quick Start
 
 ### **Development Setup**
+The server entrypoint is `cmd/api`. It needs PostgreSQL (with the schema applied) and Redis.
+
 ```bash
-# Clone repository
-git clone <repo-url>
-cd services/dozlab-api
+cd dozlab-api
 
 # Start PostgreSQL + Redis
-docker-compose -f docker-compose.dev.yml up postgres redis -d
+docker run -d --name dozlab-pg -e POSTGRES_PASSWORD=password -e POSTGRES_DB=dozlab -p 5432:5432 postgres:16-alpine
+docker run -d --name dozlab-redis -p 6379:6379 redis:7-alpine
 
-# Start DozLab API
-go run main.go
+# Apply the schema (the server does not run migrations)
+docker exec -i dozlab-pg psql -U postgres -d dozlab < internal/database/migrations/001_initial_schema.up.sql
+
+# Configure and run
+export JWT_SECRET=change-me-to-a-long-random-secret
+export DB_HOST=localhost DB_NAME=dozlab DB_USER=postgres DB_PASSWORD=password
+export REDIS_HOST=localhost
+go run ./cmd/api
+
+# Or build a binary
+go build -o bin/api ./cmd/api && ./bin/api
 
 # API will be available at:
 # Main API: http://localhost:8080
 # Health Check: http://localhost:8080/health
 # Swagger Docs: http://localhost:8080/swagger/index.html
 ```
+
+Settings read by `cmd/api` (see `internal/config`):
+
+| Variable | Default | Notes |
+|---|---|---|
+| `PORT` | `8080` | HTTP listen port |
+| `JWT_SECRET` | — | Required; the server exits without it |
+| `DATABASE_URL` | — | Full Postgres URL; if unset it is built from `DB_*` |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | port `5432` | Used when `DATABASE_URL` is unset |
+| `DB_SSLMODE` | `disable` | Used when `DATABASE_URL` is unset |
+| `REDIS_URL` | — | Full Redis URL; otherwise `REDIS_ADDR`, or `REDIS_HOST:REDIS_PORT` (port `6379`) |
+| `REDIS_PASSWORD`, `REDIS_DB` | db `0` | |
+| `KUBECONFIG` | `~/.kube/config` | In-cluster config is tried first. Without either, the server still starts but lab session routes are disabled |
+
+The server shuts down gracefully on SIGINT/SIGTERM (15 s drain).
 
 ### **Kubernetes Setup**
 ```bash
@@ -141,8 +166,8 @@ curl -X POST http://localhost:8080/api/v1/k8s/deploy \
 
 ### **Local Development (Without Kubernetes)**
 ```bash
-# Run API with in-memory lab simulation
-go run main.go --disable-k8s
+# Run without a Kubernetes config: the API starts, lab session routes are disabled
+KUBECONFIG=/dev/null go run ./cmd/api
 
 # Test API endpoints
 go test ./internal/... -v
@@ -216,7 +241,7 @@ kubectl apply -f k8s/development/
 
 # Or run locally with external K8s
 export KUBECONFIG=$HOME/.kube/config
-go run main.go
+go run ./cmd/api
 ```
 
 ### **Production Kubernetes**
