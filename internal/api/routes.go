@@ -9,6 +9,7 @@ import (
 	"dozlab-backend/internal/api/handlers"
 	"dozlab-backend/internal/middleware"
 	"dozlab-backend/internal/services"
+	"dozlab-backend/internal/websocket"
 
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -18,7 +19,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.EventBusService) {
+func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.EventBusService, wsManager *websocket.Manager) {
 	// Initialize service clients for microservices communication
 	serviceConfig := services.ServiceConfig{
 		WebSocketServiceURL:  os.Getenv("WEBSOCKET_SERVICE_URL"),
@@ -83,6 +84,11 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 			auth.POST("/login", authHandler.Login)
 			auth.POST("/refresh", authHandler.RefreshToken)
 		}
+
+		// WebSocket (notifications). Browsers can't set Authorization on a WebSocket, so they
+		// send the JWT as a subprotocol: new WebSocket(url, ["dozlab.bearer", token]).
+		// See docs/decision.md.
+		v1.GET("/ws", middleware.WebSocketAuthMiddleware(os.Getenv("JWT_SECRET")), wsManager.HandleWebSocket)
 
 		// Protected routes (require authentication)
 		protected := v1.Group("/")

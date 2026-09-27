@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -56,9 +57,16 @@ func run() error {
 	}
 	defer c.Close()
 
+	subscribeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = c.StartEventConsumers(subscribeCtx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("start event consumers: %w", err)
+	}
+
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
-	api.SetupRoutes(router, db, c.EventBus)
+	api.SetupRoutes(router, db, c.EventBus, c.WSManager)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

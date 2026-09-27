@@ -169,8 +169,24 @@ more than once for one event, so they should be idempotent.
 `POST /api/v1/proxy/notifications` publishes a `notification` event (routing key
 `notification`) with `user_id`/`session_id` from the request, and `type`, `message`, `data` and
 the caller's `sender_id` in `data`. It returns 200 with the `event_id` once the broker confirms
-the message, and 503 if publishing fails. No queue is bound to `notification` yet, so the broker
-discards these events until a consumer (e.g. a websocket service) subscribes to them.
+the message, and 503 if publishing fails.
+
+The API consumes them itself: on startup it binds `notification` to `dozlab.events.dozlab-api`
+and pushes each event to the target user's open connections on `GET /api/v1/ws`. Delivery is
+best-effort. If the user isn't connected, the event is acked and dropped. With more than one API
+replica, each notification reaches only one of them (see `docs/decision.md`).
+
+Connecting to `/api/v1/ws`: browsers can't set `Authorization` on a WebSocket, so they pass the
+JWT as a subprotocol after the `dozlab.bearer` sentinel, and the server echoes only
+`dozlab.bearer`. Other clients can use `Authorization: Bearer <JWT>`. The options and
+trade-offs are in `docs/decision.md`.
+
+```js
+const ws = new WebSocket("ws://localhost:8080/api/v1/ws", ["dozlab.bearer", accessToken]);
+ws.onmessage = (e) => {
+  const msg = JSON.parse(e.data); // {type: "notification", session_id, data: {id, type, message, data, sender_id}, timestamp}
+};
+```
 
 Run the RabbitMQ integration tests with `RABBITMQ_URL=amqp://guest:guest@localhost:5672/ go test ./internal/messaging/`;
 without `RABBITMQ_URL` they are skipped.

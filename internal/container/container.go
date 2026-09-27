@@ -1,6 +1,7 @@
 package container
 
 import (
+	"context"
 	"errors"
 	"net/url"
 	"strconv"
@@ -49,6 +50,7 @@ func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.I
 
 	// Initialize WebSocket components
 	wsManager := websocket.NewManager()
+	go wsManager.Start()
 	wsService := websocket.NewSessionService(wsManager)
 
 	// Create validation service
@@ -97,6 +99,13 @@ func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.I
 	}
 
 	return container, nil
+}
+
+// StartEventConsumers subscribes this service's consumers to the event bus:
+// notification events go to the users' WebSocket connections.
+func (c *Container) StartEventConsumers(ctx context.Context) error {
+	c.EventBus.RegisterHandler(string(websocket.EventNotification), c.WSManager.HandleNotificationEvent)
+	return c.EventBus.Subscribe(ctx, []string{string(websocket.EventNotification)})
 }
 
 // redisURL returns cfg.Redis.URL, or builds one from RedisAddr/RedisPassword/RedisDB
