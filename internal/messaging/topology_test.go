@@ -93,3 +93,22 @@ func TestDeclareGroup(t *testing.T) {
 		t.Errorf("bindings = %+v, want %+v", f.bindings, wantBindings)
 	}
 }
+
+func TestDeclareInstance(t *testing.T) {
+	f := &fakeDeclarer{}
+	queue := InstanceQueueName("api", "pod-1-abcd")
+	if queue != "dozlab.events.api.instance.pod-1-abcd" {
+		t.Fatalf("InstanceQueueName = %s", queue)
+	}
+	if err := declareInstance(f, queue, []string{"notification"}); err != nil {
+		t.Fatal(err)
+	}
+
+	wantArgs := amqp.Table{"x-queue-type": "classic", "x-expires": int64(120000)}
+	if len(f.queues) != 1 || f.queues[0].name != queue || f.queues[0].durable || !reflect.DeepEqual(f.queues[0].args, wantArgs) {
+		t.Errorf("queues = %+v, want one non-durable %s with args %v", f.queues, queue, wantArgs)
+	}
+	if want := []binding{{queue, "notification", "dozlab.events"}}; !reflect.DeepEqual(f.bindings, want) {
+		t.Errorf("bindings = %+v, want %+v", f.bindings, want)
+	}
+}

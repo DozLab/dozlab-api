@@ -159,12 +159,53 @@ declared on startup and is idempotent:
 - `dozlab.events.dozlab-api`: durable quorum queue for this service, bound to the event types it subscribes to.
 - `dozlab.events.dozlab-api.retry`: failed messages wait here for `RABBITMQ_RETRY_DELAY`, then
   dead-letter back to `dozlab.events` with key `retry.dozlab-api`, so they return only to this service.
+- `dozlab.events.dozlab-api.instance.<id>`: per-process queue for events every replica must see
+  (`SubscribeInstance`); see the notifications section below.
 - `dozlab.events.dlq`: messages that failed `RABBITMQ_MAX_RETRIES` times (headers
   `x-dozlab-last-error`, `x-dozlab-consumer-group`, `x-dozlab-original-routing-key`).
 
 Messages are persistent and published with confirms; a delivery is acked only after its
 handlers succeed. The bus reconnects with backoff if the connection drops. Handlers may run
 more than once for one event, so they should be idempotent.
+
+`POST /api/v1/proxy/notifications` publishes a `notification` event (routing key
+`notification`) with `user_id`/`session_id` from the request, and `type`, `message`, `data` and
+the caller's `sender_id` in `data`. It returns 200 with the `event_id` once the broker confirms
+the message, and 503 if publishing fails.
+
+The API consumes them itself and pushes each event to the target user's open connections on
+`GET /api/v1/ws`. Each API process has its own queue, `dozlab.events.dozlab-api.instance.<id>`
+(`<id>` is `<hostname>-<random>`), bound to `notification`, so every replica receives every
+notification and delivers it to the connections it holds. The queue is a non-durable classic
+queue: it survives a reconnect, and the broker deletes it 2 minutes after its process stops
+consuming. Delivery is best-effort. If the user isn't connected, the event is acked and dropped,
+and a failed handler sends the event to `dozlab.events.dlq` without retries.
+
+LabSession phase changes published by dozlab-controller (`labsession.phase_changed`, see its
+README) go to the same instance queue. Each one becomes a `session_status` message on the
+owner's (`user_id`) connections:
+
+```json
+{"type": "session_status", "session_id": "...", "timestamp": 1790546400,
+ "data": {"status": "running", "phase": "Running", "session_id": "...", "user_id": "...",
+          "event_id": "<labsession uid>.Running", "message": "Lab session is running",
+          "endpoints": {"terminal": "..."}, "reason": "(if set)"}}
+```
+
+`status` is the lowercased phase (`pending`, `creating`, `running`, `failed`, `terminating`).
+The controller can publish a phase twice with the same `event_id`, so clients should ignore repeats.
+
+Connecting to `/api/v1/ws`: browsers can't set `Authorization` on a WebSocket, so they pass the
+JWT as a subprotocol after the `dozlab.bearer` sentinel, and the server echoes only
+`dozlab.bearer`. Other clients can use `Authorization: Bearer <JWT>`. The options and
+trade-offs are in `docs/decision.md`.
+
+```js
+const ws = new WebSocket("ws://localhost:8080/api/v1/ws", ["dozlab.bearer", accessToken]);
+ws.onmessage = (e) => {
+  const msg = JSON.parse(e.data); // {type: "notification", session_id, data: {id, type, message, data, sender_id}, timestamp}
+};
+```
 
 Run the RabbitMQ integration tests with `RABBITMQ_URL=amqp://guest:guest@localhost:5672/ go test ./internal/messaging/`;
 without `RABBITMQ_URL` they are skipped.
