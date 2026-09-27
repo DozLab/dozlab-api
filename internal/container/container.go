@@ -1,11 +1,14 @@
 package container
 
 import (
+	"context"
+	"errors"
 	"net/url"
 	"strconv"
 
 	"dozlab-backend/internal/config"
 	"dozlab-backend/internal/database"
+	"dozlab-backend/internal/messaging"
 	"dozlab-backend/internal/services"
 	"dozlab-backend/internal/websocket"
 	"k8s.io/client-go/dynamic"
@@ -28,8 +31,14 @@ type Container struct {
 	K8sClient    dynamic.Interface
 	WSManager    *websocket.Manager
 	WSService    *websocket.SessionService
+	// RedisEventBus stays for event storage (GetEvent) and session event streams
 	RedisEventBus *websocket.RedisEventBus
+	// RabbitEventBus carries EventBus publish/subscribe
+	RabbitEventBus *messaging.RabbitEventBus
 }
+
+// eventConsumerGroup names this service's RabbitMQ queue (dozlab.events.dozlab-api)
+const eventConsumerGroup = "dozlab-api"
 
 // NewContainer creates and wires up all dependencies
 func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.Interface) (*Container, error) {
@@ -41,13 +50,27 @@ func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.I
 
 	// Initialize WebSocket components
 	wsManager := websocket.NewManager()
+	go wsManager.Start()
 	wsService := websocket.NewSessionService(wsManager)
 
 	// Create validation service
 	validationService := services.NewValidationService(cfg)
 
+	// RabbitMQ carries publish/subscribe; Redis keeps stored events
+	rabbitEventBus, err := messaging.NewRabbitEventBus(messaging.Config{
+		URL:           cfg.RabbitMQ.URL,
+		ConsumerGroup: eventConsumerGroup,
+		Prefetch:      cfg.RabbitMQ.Prefetch,
+		MaxRetries:    cfg.RabbitMQ.MaxRetries,
+		RetryDelay:    cfg.RabbitMQ.RetryDelay,
+	})
+	if err != nil {
+		redisEventBus.Close()
+		return nil, err
+	}
+
 	// Initialize event bus service first (needed by other services)
-	eventBusService := services.NewEventBusService(redisEventBus)
+	eventBusService := services.NewEventBusService(rabbitEventBus, redisEventBus)
 
 	// Initialize services with dependency injection
 	labService := services.NewLabService(db)
@@ -71,10 +94,26 @@ func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.I
 		K8sClient:     k8sClient,
 		WSManager:     wsManager,
 		WSService:     wsService,
-		RedisEventBus: redisEventBus,
+		RedisEventBus:  redisEventBus,
+		RabbitEventBus: rabbitEventBus,
 	}
 
 	return container, nil
+}
+
+// StartEventConsumers subscribes this service's consumers to the event bus:
+// notifications and LabSession phase changes (from dozlab-controller) go to the
+// users' WebSocket connections. Each replica holds its own connections, so they
+// use this process's instance queue (every replica gets every event) rather
+// than the shared group queue.
+func (c *Container) StartEventConsumers(ctx context.Context) error {
+	c.RabbitEventBus.RegisterHandler(websocket.EventNotification, func(ctx context.Context, e *websocket.Event) error {
+		return c.WSManager.HandleNotificationEvent(ctx, e)
+	})
+	c.RabbitEventBus.RegisterHandler(websocket.EventLabSessionPhaseChanged, func(ctx context.Context, e *websocket.Event) error {
+		return c.WSManager.HandleLabSessionPhaseEvent(ctx, e)
+	})
+	return c.RabbitEventBus.SubscribeInstance(ctx, websocket.EventNotification, websocket.EventLabSessionPhaseChanged)
 }
 
 // redisURL returns cfg.Redis.URL, or builds one from RedisAddr/RedisPassword/RedisDB
@@ -91,10 +130,12 @@ func redisURL(cfg *config.Config) string {
 
 // Close gracefully shuts down all services
 func (c *Container) Close() error {
-	if c.RedisEventBus != nil {
-		if err := c.RedisEventBus.Close(); err != nil {
-			return err
-		}
+	var errs []error
+	if c.RabbitEventBus != nil {
+		errs = append(errs, c.RabbitEventBus.Close())
 	}
-	return nil
+	if c.RedisEventBus != nil {
+		errs = append(errs, c.RedisEventBus.Close())
+	}
+	return errors.Join(errs...)
 }

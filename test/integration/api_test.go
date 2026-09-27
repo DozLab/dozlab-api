@@ -11,6 +11,7 @@ import (
 	"dozlab-backend/internal/api"
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
+	"dozlab-backend/internal/websocket"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -44,7 +45,7 @@ func (suite *APITestSuite) SetupSuite() {
 	
 	// Setup router
 	suite.router = gin.New()
-	api.SetupRoutes(suite.router, suite.db)
+	api.SetupRoutes(suite.router, suite.db, nil, websocket.NewManager()) // no notification tests here
 }
 
 func (suite *APITestSuite) TearDownSuite() {
