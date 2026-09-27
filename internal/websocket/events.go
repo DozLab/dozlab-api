@@ -54,6 +54,9 @@ const (
 	// User events
 	EventUserJoined EventType = "user.joined"
 	EventUserLeft   EventType = "user.left"
+
+	// Notification events
+	EventNotification EventType = "notification"
 )
 
 // Event represents a system event

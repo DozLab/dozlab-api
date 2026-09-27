@@ -166,6 +166,12 @@ Messages are persistent and published with confirms; a delivery is acked only af
 handlers succeed. The bus reconnects with backoff if the connection drops. Handlers may run
 more than once for one event, so they should be idempotent.
 
+`POST /api/v1/proxy/notifications` publishes a `notification` event (routing key
+`notification`) with `user_id`/`session_id` from the request, and `type`, `message`, `data` and
+the caller's `sender_id` in `data`. It returns 200 with the `event_id` once the broker confirms
+the message, and 503 if publishing fails. No queue is bound to `notification` yet, so the broker
+discards these events until a consumer (e.g. a websocket service) subscribes to them.
+
 Run the RabbitMQ integration tests with `RABBITMQ_URL=amqp://guest:guest@localhost:5672/ go test ./internal/messaging/`;
 without `RABBITMQ_URL` they are skipped.
 

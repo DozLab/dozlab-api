@@ -18,7 +18,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-func SetupRoutes(router *gin.Engine, db *database.Database) {
+func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.EventBusService) {
 	// Initialize service clients for microservices communication
 	serviceConfig := services.ServiceConfig{
 		WebSocketServiceURL:  os.Getenv("WEBSOCKET_SERVICE_URL"),
@@ -47,6 +47,7 @@ func SetupRoutes(router *gin.Engine, db *database.Database) {
 	userHandler := handlers.NewUserHandler(db)
 	labHandler := handlers.NewLabHandler(db)
 	authHandler := handlers.NewAuthHandler(db)
+	notificationHandler := handlers.NewNotificationHandler(eventBus)
 	
 	// Initialize CRD-based lab session handler
 	var labSessionHandler *handlers.LabSessionHandler
@@ -154,21 +155,8 @@ func SetupRoutes(router *gin.Engine, db *database.Database) {
 					c.JSON(http.StatusOK, stats)
 				})
 				
-				// Notification endpoint (proxies to WebSocket service)
-				proxy.POST("/notifications", func(c *gin.Context) {
-					var req services.NotificationRequest
-					if err := c.ShouldBindJSON(&req); err != nil {
-						c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-						return
-					}
-					
-					if err := serviceClients.SendNotification(c.Request.Context(), req); err != nil {
-						c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Notification service unavailable"})
-						return
-					}
-					
-					c.JSON(http.StatusOK, gin.H{"message": "Notification sent"})
-				})
+				// Notifications go out on the event bus (RabbitMQ, routing key "notification")
+				proxy.POST("/notifications", notificationHandler.SendNotification)
 			}
 		}
 

@@ -58,7 +58,7 @@ func run() error {
 
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
-	api.SetupRoutes(router, db)
+	api.SetupRoutes(router, db, c.EventBus)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

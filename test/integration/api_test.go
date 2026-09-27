@@ -44,7 +44,7 @@ func (suite *APITestSuite) SetupSuite() {
 	
 	// Setup router
 	suite.router = gin.New()
-	api.SetupRoutes(suite.router, suite.db)
+	api.SetupRoutes(suite.router, suite.db, nil) // no notification tests here
 }
 
 func (suite *APITestSuite) TearDownSuite() {
