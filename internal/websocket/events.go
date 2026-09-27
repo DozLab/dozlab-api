@@ -57,6 +57,9 @@ const (
 
 	// Notification events
 	EventNotification EventType = "notification"
+
+	// LabSession phase changes, published by dozlab-controller
+	EventLabSessionPhaseChanged EventType = "labsession.phase_changed"
 )
 
 // Event represents a system event
