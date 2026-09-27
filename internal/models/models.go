@@ -4,11 +4,55 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
+
+// The ID columns have no database default so the models work on both
+// PostgreSQL and SQLite; the BeforeCreate hooks below assign them instead.
+
+// BeforeCreate assigns a new ID if none is set.
+func (u *User) BeforeCreate(tx *gorm.DB) error {
+	if u.ID == uuid.Nil {
+		u.ID = uuid.New()
+	}
+	return nil
+}
+
+// BeforeCreate assigns a new ID if none is set.
+func (l *Lab) BeforeCreate(tx *gorm.DB) error {
+	if l.ID == uuid.Nil {
+		l.ID = uuid.New()
+	}
+	return nil
+}
+
+// BeforeCreate assigns a new ID if none is set.
+func (ls *LabSpec) BeforeCreate(tx *gorm.DB) error {
+	if ls.ID == uuid.Nil {
+		ls.ID = uuid.New()
+	}
+	return nil
+}
+
+// BeforeCreate assigns a new ID if none is set.
+func (s *Session) BeforeCreate(tx *gorm.DB) error {
+	if s.ID == uuid.Nil {
+		s.ID = uuid.New()
+	}
+	return nil
+}
+
+// BeforeCreate assigns a new ID if none is set.
+func (up *UserProgress) BeforeCreate(tx *gorm.DB) error {
+	if up.ID == uuid.Nil {
+		up.ID = uuid.New()
+	}
+	return nil
+}
 
 // User represents a user in the system
 type User struct {
-	ID           uuid.UUID  `json:"id" db:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	ID           uuid.UUID  `json:"id" db:"id" gorm:"type:uuid;primary_key"`
 	Username     string     `json:"username" db:"username" gorm:"type:varchar(50);uniqueIndex;not null" binding:"required,min=3,max=50"`
 	Email        string     `json:"email" db:"email" gorm:"type:varchar(255);uniqueIndex;not null" binding:"required,email"`
 	PasswordHash string     `json:"-" db:"password_hash" gorm:"type:varchar(255);not null"`
@@ -23,7 +67,7 @@ type User struct {
 
 // Lab represents a lab definition
 type Lab struct {
-	ID                uuid.UUID  `json:"id" db:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	ID                uuid.UUID  `json:"id" db:"id" gorm:"type:uuid;primary_key"`
 	Name              string     `json:"name" db:"name" gorm:"type:varchar(255);not null" binding:"required,min=3,max=255"`
 	Slug              string     `json:"slug" db:"slug" gorm:"type:varchar(100);uniqueIndex;not null" binding:"required,min=3,max=100"`
 	Description       *string    `json:"description,omitempty" db:"description" gorm:"type:text"`
@@ -45,7 +89,7 @@ type Lab struct {
 
 // LabSpec represents lab specifications with composite primary key
 type LabSpec struct {
-	ID                 uuid.UUID   `json:"id" db:"id" gorm:"type:uuid;uniqueIndex;not null;default:gen_random_uuid()"`
+	ID                 uuid.UUID   `json:"id" db:"id" gorm:"type:uuid;uniqueIndex;not null"`
 	LabID              uuid.UUID   `json:"lab_id" db:"lab_id" gorm:"type:uuid;primaryKey"`
 	Version            int         `json:"version" db:"version" gorm:"primaryKey"`
 	Specification      interface{} `json:"specification" db:"specification" gorm:"type:jsonb;not null"`
@@ -61,7 +105,7 @@ type LabSpec struct {
 
 // Session represents an active lab session
 type Session struct {
-	ID           uuid.UUID   `json:"id" db:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	ID           uuid.UUID   `json:"id" db:"id" gorm:"type:uuid;primary_key"`
 	UserID       uuid.UUID   `json:"user_id" db:"user_id" gorm:"type:uuid;not null;index"`
 	LabID        uuid.UUID   `json:"lab_id" db:"lab_id" gorm:"type:uuid;not null;index"`
 	LabSpecID    *uuid.UUID  `json:"lab_spec_id,omitempty" db:"lab_spec_id" gorm:"type:uuid;index"`
@@ -83,7 +127,7 @@ type Session struct {
 
 // UserProgress represents user progress with composite primary key
 type UserProgress struct {
-	ID                 uuid.UUID   `json:"id" db:"id" gorm:"type:uuid;uniqueIndex;not null;default:gen_random_uuid()"`
+	ID                 uuid.UUID   `json:"id" db:"id" gorm:"type:uuid;uniqueIndex;not null"`
 	UserID             uuid.UUID   `json:"user_id" db:"user_id" gorm:"type:uuid;primaryKey"`
 	LabID              uuid.UUID   `json:"lab_id" db:"lab_id" gorm:"type:uuid;primaryKey"`
 	SessionID          *uuid.UUID  `json:"session_id,omitempty" db:"session_id" gorm:"type:uuid;index"`

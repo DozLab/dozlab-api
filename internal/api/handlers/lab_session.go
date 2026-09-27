@@ -190,7 +190,7 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err = h.k8sClient.Resource(h.labSessionGVR).Namespace("default").Create(ctx, labSession, metav1.CreateOptions{})
+	_, err := h.k8sClient.Resource(h.labSessionGVR).Namespace("default").Create(ctx, labSession, metav1.CreateOptions{})
 	if err != nil {
 		// Update session status to failed
 		h.db.DB.Model(&session).Update("status", "failed")

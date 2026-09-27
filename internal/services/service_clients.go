@@ -39,6 +39,7 @@ type ServiceConfig struct {
 
 // WebSocket Service Communication
 
+// NotificationRequest is the body SendNotification posts to the WebSocket service.
 type NotificationRequest struct {
 	UserID    string      `json:"user_id"`
 	SessionID string      `json:"session_id,omitempty"`
@@ -72,12 +73,14 @@ func (s *ServiceClients) GetWebSocketStats(ctx context.Context) (map[string]inte
 
 // Examiner Service Communication
 
+// ValidationRequest asks the Examiner service to check a lab session against Rules.
 type ValidationRequest struct {
 	SessionID string      `json:"session_id"`
 	LabID     string      `json:"lab_id"`
 	Rules     interface{} `json:"rules"`
 }
 
+// ValidationResponse is the Examiner service's result for a ValidationRequest.
 type ValidationResponse struct {
 	Valid   bool        `json:"valid"`
 	Score   int         `json:"score"`
@@ -99,12 +102,14 @@ func (s *ServiceClients) ValidateLabSession(ctx context.Context, req ValidationR
 
 // Workflow Service Communication
 
+// WorkflowRequest asks the Workflow service to run Steps for a session.
 type WorkflowRequest struct {
 	Name      string      `json:"name"`
 	Steps     interface{} `json:"steps"`
 	SessionID string      `json:"session_id"`
 }
 
+// WorkflowResponse describes a workflow run returned by the Workflow service.
 type WorkflowResponse struct {
 	ID       string `json:"id"`
 	Status   string `json:"status"`

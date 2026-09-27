@@ -347,14 +347,7 @@ func (bus *RedisEventBus) GetSessionEvents(ctx context.Context, sessionID string
 	end := "+"
 	if count > 0 {
 		// Use XRANGE with COUNT
-		args := &redis.XRangeArgs{
-			Stream: streamKey,
-			Start:  start,
-			Stop:   end,
-			Count:  count,
-		}
-		
-		result, err := bus.client.XRange(ctx, args).Result()
+		result, err := bus.client.XRangeN(ctx, streamKey, start, end, count).Result()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get session events: %w", err)
 		}

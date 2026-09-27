@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"dozlab-backend/internal/config"
 )
 
 type validationService struct {
@@ -20,8 +22,8 @@ func NewValidationService(cfg *config.Config) ValidationService {
 }
 
 // ValidateConfig validates the entire configuration
-func (s *validationService) ValidateConfig(config interface{}) error {
-	cfg, ok := config.(*config.Config)
+func (s *validationService) ValidateConfig(c interface{}) error {
+	cfg, ok := c.(*config.Config)
 	if !ok {
 		return fmt.Errorf("invalid config type")
 	}
@@ -30,7 +32,7 @@ func (s *validationService) ValidateConfig(config interface{}) error {
 		return fmt.Errorf("required fields validation failed: %w", err)
 	}
 
-	if err := s.validateConnectionStrings(); err != nil {
+	if err := s.ValidateConnectionStrings(); err != nil {
 		return fmt.Errorf("connection strings validation failed: %w", err)
 	}
 

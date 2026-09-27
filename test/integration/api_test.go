@@ -3,7 +3,6 @@ package integration
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,7 +40,10 @@ func (suite *APITestSuite) SetupSuite() {
 	err = gormDB.AutoMigrate(&models.User{}, &models.Lab{}, &models.LabSpec{})
 	suite.NoError(err)
 	
-	suite.db = &database.Database{DB: gormDB}
+	sqlDB, err := gormDB.DB()
+	suite.NoError(err)
+
+	suite.db = &database.Database{DB: gormDB, SqlDB: sqlDB}
 	
 	// Setup router
 	suite.router = gin.New()
@@ -112,10 +114,12 @@ func (suite *APITestSuite) TestUserRegistrationFlow() {
 	
 	assert.Equal(suite.T(), http.StatusOK, w.Code)
 	
-	var profileResponse models.UserResponse
+	var profileResponse struct {
+		User models.UserResponse `json:"user"`
+	}
 	err = json.Unmarshal(w.Body.Bytes(), &profileResponse)
 	assert.NoError(suite.T(), err)
-	assert.Equal(suite.T(), "integrationtest", profileResponse.Username)
+	assert.Equal(suite.T(), "integrationtest", profileResponse.User.Username)
 }
 
 func (suite *APITestSuite) TestLoginFlow() {
@@ -124,8 +128,8 @@ func (suite *APITestSuite) TestLoginFlow() {
 		Username:     "logintest",
 		Email:        "login@test.com",
 		PasswordHash: "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", // "password"
-		FirstName:    "Login",
-		LastName:     "Test",
+		FirstName:    strPtr("Login"),
+		LastName:     strPtr("Test"),
 		Role:         "student",
 		IsActive:     true,
 	}
@@ -183,8 +187,8 @@ func (suite *APITestSuite) TestUserProfileUpdate() {
 		Username:     "updatetest",
 		Email:        "update@test.com",
 		PasswordHash: "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi",
-		FirstName:    "Update",
-		LastName:     "Test",
+		FirstName:    strPtr("Update"),
+		LastName:     strPtr("Test"),
 		Role:         "student",
 		IsActive:     true,
 	}
@@ -232,11 +236,13 @@ func (suite *APITestSuite) TestUserProfileUpdate() {
 	w = httptest.NewRecorder()
 	suite.router.ServeHTTP(w, req)
 	
-	var profileResponse models.UserResponse
+	var profileResponse struct {
+		User models.UserResponse `json:"user"`
+	}
 	json.Unmarshal(w.Body.Bytes(), &profileResponse)
-	assert.Equal(suite.T(), "Updated", profileResponse.FirstName)
-	assert.Equal(suite.T(), "Name", profileResponse.LastName)
-	assert.Equal(suite.T(), "updated@test.com", profileResponse.Email)
+	assert.Equal(suite.T(), strPtr("Updated"), profileResponse.User.FirstName)
+	assert.Equal(suite.T(), strPtr("Name"), profileResponse.User.LastName)
+	assert.Equal(suite.T(), "updated@test.com", profileResponse.User.Email)
 }
 
 func (suite *APITestSuite) TestCORSHeaders() {
@@ -253,3 +259,5 @@ func (suite *APITestSuite) TestCORSHeaders() {
 func TestAPITestSuite(t *testing.T) {
 	suite.Run(t, new(APITestSuite))
 }
+
+func strPtr(s string) *string { return &s }

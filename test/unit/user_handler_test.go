@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,33 +18,35 @@ import (
 	"gorm.io/gorm"
 )
 
-func setupUserHandler() *handlers.UserHandler {
+func setupUserHandler() (*handlers.UserHandler, *gorm.DB) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		panic("failed to connect database")
 	}
 	
-	db.AutoMigrate(&models.User{})
-	
+	if err := db.AutoMigrate(&models.User{}, &models.UserProgress{}); err != nil {
+		panic("failed to migrate database: " + err.Error())
+	}
+
 	mockDB := &database.Database{DB: db}
-	return handlers.NewUserHandler(mockDB)
+	return handlers.NewUserHandler(mockDB), db
 }
 
 func TestUserHandler_GetProfile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := setupUserHandler()
+	handler, db := setupUserHandler()
 
 	// Create a test user
 	testUser := models.User{
 		ID:        uuid.New(),
 		Username:  "testprofile",
 		Email:     "profile@example.com",
-		FirstName: "Test",
-		LastName:  "Profile",
+		FirstName: strPtr("Test"),
+		LastName:  strPtr("Profile"),
 		Role:      "student",
 		IsActive:  true,
 	}
-	handler.(*handlers.UserHandler).DB.DB.Create(&testUser)
+	db.Create(&testUser)
 
 	tests := []struct {
 		name           string
@@ -89,11 +92,13 @@ func TestUserHandler_GetProfile(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, w.Code)
 
 			if tt.expectUser {
-				var response models.UserResponse
+				var response struct {
+					User models.UserResponse `json:"user"`
+				}
 				err := json.Unmarshal(w.Body.Bytes(), &response)
 				assert.NoError(t, err)
-				assert.Equal(t, testUser.Username, response.Username)
-				assert.Equal(t, testUser.Email, response.Email)
+				assert.Equal(t, testUser.Username, response.User.Username)
+				assert.Equal(t, testUser.Email, response.User.Email)
 			}
 		})
 	}
@@ -101,19 +106,19 @@ func TestUserHandler_GetProfile(t *testing.T) {
 
 func TestUserHandler_UpdateProfile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := setupUserHandler()
+	handler, db := setupUserHandler()
 
 	// Create a test user
 	testUser := models.User{
 		ID:        uuid.New(),
 		Username:  "testupdate",
 		Email:     "update@example.com",
-		FirstName: "Test",
-		LastName:  "Update",
+		FirstName: strPtr("Test"),
+		LastName:  strPtr("Update"),
 		Role:      "student",
 		IsActive:  true,
 	}
-	handler.(*handlers.UserHandler).DB.DB.Create(&testUser)
+	db.Create(&testUser)
 
 	// Test successful update
 	updateData := map[string]string{
@@ -137,15 +142,15 @@ func TestUserHandler_UpdateProfile(t *testing.T) {
 
 	// Verify the update
 	var updatedUser models.User
-	handler.(*handlers.UserHandler).DB.DB.First(&updatedUser, testUser.ID)
-	assert.Equal(t, "Updated", updatedUser.FirstName)
-	assert.Equal(t, "Name", updatedUser.LastName)
+	db.First(&updatedUser, testUser.ID)
+	assert.Equal(t, "Updated", *updatedUser.FirstName)
+	assert.Equal(t, "Name", *updatedUser.LastName)
 	assert.Equal(t, "updated@example.com", updatedUser.Email)
 }
 
 func TestUserHandler_GetUserProgress(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := setupUserHandler()
+	handler, db := setupUserHandler()
 
 	testUser := models.User{
 		ID:       uuid.New(),
@@ -154,7 +159,7 @@ func TestUserHandler_GetUserProgress(t *testing.T) {
 		Role:     "student",
 		IsActive: true,
 	}
-	handler.(*handlers.UserHandler).DB.DB.Create(&testUser)
+	db.Create(&testUser)
 
 	req, _ := http.NewRequest("GET", "/progress", nil)
 	
@@ -171,7 +176,7 @@ func TestUserHandler_GetUserProgress(t *testing.T) {
 
 func TestUserHandler_GetAllUsers_Admin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := setupUserHandler()
+	handler, db := setupUserHandler()
 
 	// Create test users
 	users := []models.User{
@@ -192,7 +197,7 @@ func TestUserHandler_GetAllUsers_Admin(t *testing.T) {
 	}
 
 	for _, user := range users {
-		handler.(*handlers.UserHandler).DB.DB.Create(&user)
+		db.Create(&user)
 	}
 
 	req, _ := http.NewRequest("GET", "/admin/users", nil)

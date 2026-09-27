@@ -132,6 +132,43 @@ func (s *SessionService) TerminateLabSession(userID, labID, sessionID, reason st
 		"Your lab session has been terminated: " + reason, "warning")
 }
 
+// CreateSession prepares a session for WebSocket clients. Session groups are
+// created lazily when the first client registers, so this only logs.
+func (s *SessionService) CreateSession(sessionID string) {
+	log.Printf("WebSocket session %s ready", sessionID)
+}
+
+// CloseSession notifies all clients in a session that it has ended
+func (s *SessionService) CloseSession(sessionID, reason string) {
+	s.manager.SendToSession(sessionID, Message{
+		Type:      MessageTypeSessionStatus,
+		SessionID: sessionID,
+		Data: map[string]interface{}{
+			"status":     "terminated",
+			"session_id": sessionID,
+			"reason":     reason,
+		},
+		Timestamp: time.Now().Unix(),
+	})
+}
+
+// BroadcastToSession sends an event payload to all clients in a session.
+// The payload's "type" field, if set, becomes the message type.
+func (s *SessionService) BroadcastToSession(sessionID string, data map[string]interface{}) error {
+	msgType := MessageTypeNotification
+	if t, ok := data["type"].(string); ok && t != "" {
+		msgType = t
+	}
+
+	s.manager.SendToSession(sessionID, Message{
+		Type:      msgType,
+		SessionID: sessionID,
+		Data:      data,
+		Timestamp: time.Now().Unix(),
+	})
+	return nil
+}
+
 // SendTerminalOutput sends terminal output to all clients in a session
 func (s *SessionService) SendTerminalOutput(sessionID, output string) {
 	clients := s.manager.GetSessionClients(sessionID)
