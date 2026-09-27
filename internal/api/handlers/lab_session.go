@@ -113,7 +113,7 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 	// Check for existing active session
 	var existingSession models.Session
 	if err := h.db.DB.Where("user_id = ? AND lab_id = ? AND status IN (?)", 
-		userID, req.LabID, []string{"pending", "running"}).First(&existingSession).Error; err == nil {
+		userID, req.LabID, []string{SessionStatusPending, SessionStatusRunning}).First(&existingSession).Error; err == nil {
 		c.JSON(http.StatusConflict, gin.H{
 			"error": "You already have an active session for this lab",
 			"session_id": existingSession.ID,
@@ -127,7 +127,7 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 		ID:       sessionID,
 		UserID:   userID.(uuid.UUID),
 		LabID:    req.LabID,
-		Status:   "pending",
+		Status:   SessionStatusPending,
 	}
 
 	if err := h.db.DB.Create(&session).Error; err != nil {
@@ -193,7 +193,7 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 	_, err := h.k8sClient.Resource(h.labSessionGVR).Namespace("default").Create(ctx, labSession, metav1.CreateOptions{})
 	if err != nil {
 		// Update session status to failed
-		h.db.DB.Model(&session).Update("status", "failed")
+		h.db.DB.Model(&session).Update("status", SessionStatusFailed)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to create lab session",
 			"details": err.Error(),
@@ -201,8 +201,7 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 		return
 	}
 
-	// Update session status to creating
-	h.db.DB.Model(&session).Update("status", "creating")
+	// The session stays pending until the controller reports Running
 
 	// Load the session with relationships
 	h.db.DB.Preload("Lab").Preload("User").First(&session, session.ID)
@@ -270,7 +269,7 @@ func (h *LabSessionHandler) GetLabSession(c *gin.Context) {
 
 	// Get Kubernetes status if session is active
 	var k8sStatus *K8sSessionStatus
-	if session.Status == "running" || session.Status == "creating" {
+	if isActiveSessionStatus(session.Status) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -392,7 +391,7 @@ func (h *LabSessionHandler) DeleteLabSession(c *gin.Context) {
 	}
 
 	// Delete from Kubernetes if active
-	if session.Status == "running" || session.Status == "creating" {
+	if isActiveSessionStatus(session.Status) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -403,7 +402,7 @@ func (h *LabSessionHandler) DeleteLabSession(c *gin.Context) {
 	}
 
 	// Update session status
-	if err := h.db.DB.Model(&session).Update("status", "terminated").Error; err != nil {
+	if err := h.db.DB.Model(&session).Update("status", SessionStatusCompleted).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to update session status",
 		})
@@ -478,13 +477,13 @@ func (h *LabSessionHandler) syncSessionStatuses(sessions []models.Session) {
 	defer cancel()
 
 	for i := range sessions {
-		if sessions[i].Status == "running" || sessions[i].Status == "creating" {
+		if isActiveSessionStatus(sessions[i].Status) {
 			if k8sSession, err := h.k8sClient.Resource(h.labSessionGVR).Namespace("default").Get(ctx, fmt.Sprintf("session-%s", sessions[i].ID.String()), metav1.GetOptions{}); err == nil {
 				// Update session status based on K8s status
 				status, found, _ := unstructured.NestedString(k8sSession.Object, "status", "phase")
 				if found && status != "" {
 					dbStatus := convertPhaseToDBStatus(status)
-					if dbStatus != sessions[i].Status {
+					if dbStatus != "" && dbStatus != sessions[i].Status {
 						h.db.DB.Model(&sessions[i]).Update("status", dbStatus)
 						sessions[i].Status = dbStatus
 					}
@@ -494,18 +493,35 @@ func (h *LabSessionHandler) syncSessionStatuses(sessions []models.Session) {
 	}
 }
 
+// Session statuses allowed by the sessions_status_check constraint
+// (migrations/001_initial_schema.up.sql and models.Session).
+const (
+	SessionStatusPending   = "pending"
+	SessionStatusRunning   = "running"
+	SessionStatusCompleted = "completed"
+	SessionStatusFailed    = "failed"
+	SessionStatusExpired   = "expired"
+)
+
+// isActiveSessionStatus reports whether the session may still have Kubernetes resources
+func isActiveSessionStatus(status string) bool {
+	return status == SessionStatusPending || status == SessionStatusRunning
+}
+
+// convertPhaseToDBStatus maps a LabSession phase to a session status. It returns
+// "" for phases with no DB equivalent (e.g. Terminating), which leave the row unchanged.
 func convertPhaseToDBStatus(phase string) string {
 	switch phase {
 	case "Pending", "Creating":
-		return "creating"
+		return SessionStatusPending
 	case "Running":
-		return "running"
+		return SessionStatusRunning
 	case "Failed":
-		return "failed"
+		return SessionStatusFailed
 	case "Terminated":
-		return "terminated"
+		return SessionStatusCompleted
 	default:
-		return "unknown"
+		return ""
 	}
 }
 
