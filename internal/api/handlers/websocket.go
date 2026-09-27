@@ -3,7 +3,8 @@ package handlers
 import (
 	"net/http"
 
-	"dozlab-backend/internal/database" 
+	"dozlab-backend/internal/config"
+	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/websocket"
 
 	"github.com/gin-gonic/gin"

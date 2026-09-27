@@ -1,6 +1,10 @@
 package container
 
 import (
+	"net/url"
+	"strconv"
+
+	"dozlab-backend/internal/config"
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/services"
 	"dozlab-backend/internal/websocket"
@@ -30,14 +34,14 @@ type Container struct {
 // NewContainer creates and wires up all dependencies
 func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.Interface) (*Container, error) {
 	// Initialize Redis event bus with proper error handling
-	redisEventBus, err := websocket.NewRedisEventBus(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	redisEventBus, err := websocket.NewRedisEventBus(redisURL(cfg))
 	if err != nil {
 		return nil, err
 	}
 
 	// Initialize WebSocket components
 	wsManager := websocket.NewManager()
-	wsService := websocket.NewSessionService(wsManager, redisEventBus)
+	wsService := websocket.NewSessionService(wsManager)
 
 	// Create validation service
 	validationService := services.NewValidationService(cfg)
@@ -71,6 +75,18 @@ func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.I
 	}
 
 	return container, nil
+}
+
+// redisURL returns cfg.Redis.URL, or builds one from RedisAddr/RedisPassword/RedisDB
+func redisURL(cfg *config.Config) string {
+	if cfg.Redis.URL != "" {
+		return cfg.Redis.URL
+	}
+	u := url.URL{Scheme: "redis", Host: cfg.RedisAddr, Path: "/" + strconv.Itoa(cfg.RedisDB)}
+	if cfg.RedisPassword != "" {
+		u.User = url.UserPassword("", cfg.RedisPassword)
+	}
+	return u.String()
 }
 
 // Close gracefully shuts down all services

@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 
+	"dozlab-backend/internal/config"
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/websocket"
 	"dozlab-backend/internal/workflow"

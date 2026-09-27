@@ -3,7 +3,6 @@ package integration
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -124,8 +123,8 @@ func (suite *APITestSuite) TestLoginFlow() {
 		Username:     "logintest",
 		Email:        "login@test.com",
 		PasswordHash: "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", // "password"
-		FirstName:    "Login",
-		LastName:     "Test",
+		FirstName:    strPtr("Login"),
+		LastName:     strPtr("Test"),
 		Role:         "student",
 		IsActive:     true,
 	}
@@ -183,8 +182,8 @@ func (suite *APITestSuite) TestUserProfileUpdate() {
 		Username:     "updatetest",
 		Email:        "update@test.com",
 		PasswordHash: "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi",
-		FirstName:    "Update",
-		LastName:     "Test",
+		FirstName:    strPtr("Update"),
+		LastName:     strPtr("Test"),
 		Role:         "student",
 		IsActive:     true,
 	}
@@ -234,8 +233,8 @@ func (suite *APITestSuite) TestUserProfileUpdate() {
 	
 	var profileResponse models.UserResponse
 	json.Unmarshal(w.Body.Bytes(), &profileResponse)
-	assert.Equal(suite.T(), "Updated", profileResponse.FirstName)
-	assert.Equal(suite.T(), "Name", profileResponse.LastName)
+	assert.Equal(suite.T(), strPtr("Updated"), profileResponse.FirstName)
+	assert.Equal(suite.T(), strPtr("Name"), profileResponse.LastName)
 	assert.Equal(suite.T(), "updated@test.com", profileResponse.Email)
 }
 
@@ -253,3 +252,5 @@ func (suite *APITestSuite) TestCORSHeaders() {
 func TestAPITestSuite(t *testing.T) {
 	suite.Run(t, new(APITestSuite))
 }
+
+func strPtr(s string) *string { return &s }

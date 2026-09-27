@@ -1,7 +1,6 @@
 package examiner
 
 import (
-	"encoding/json"
 	"time"
 )
 

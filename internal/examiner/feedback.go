@@ -3,7 +3,6 @@ package examiner
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"

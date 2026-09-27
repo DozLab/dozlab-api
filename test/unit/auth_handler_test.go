@@ -127,8 +127,8 @@ func TestAuthHandler_Login(t *testing.T) {
 		Username:     "testlogin",
 		Email:        "login@example.com",
 		PasswordHash: "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", // "password"
-		FirstName:    "Test",
-		LastName:     "Login",
+		FirstName:    strPtr("Test"),
+		LastName:     strPtr("Login"),
 		Role:         "student",
 		IsActive:     true,
 	}
@@ -224,3 +224,4 @@ func TestAuthHandler_RefreshToken(t *testing.T) {
 	// Should return unauthorized for invalid token
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
+func strPtr(s string) *string { return &s }

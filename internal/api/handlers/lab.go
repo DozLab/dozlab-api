@@ -6,6 +6,7 @@ import (
 
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
+	"dozlab-backend/internal/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -13,12 +14,14 @@ import (
 )
 
 type LabHandler struct {
-	db *database.Database
+	db         *database.Database
+	labService services.LabService
 }
 
 func NewLabHandler(db *database.Database) *LabHandler {
 	return &LabHandler{
-		db: db,
+		db:         db,
+		labService: services.NewLabService(db),
 	}
 }
 
