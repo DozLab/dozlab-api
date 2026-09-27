@@ -181,6 +181,20 @@ queue: it survives a reconnect, and the broker deletes it 2 minutes after its pr
 consuming. Delivery is best-effort. If the user isn't connected, the event is acked and dropped,
 and a failed handler sends the event to `dozlab.events.dlq` without retries.
 
+LabSession phase changes published by dozlab-controller (`labsession.phase_changed`, see its
+README) go to the same instance queue. Each one becomes a `session_status` message on the
+owner's (`user_id`) connections:
+
+```json
+{"type": "session_status", "session_id": "...", "timestamp": 1790546400,
+ "data": {"status": "running", "phase": "Running", "session_id": "...", "user_id": "...",
+          "event_id": "<labsession uid>.Running", "message": "Lab session is running",
+          "endpoints": {"terminal": "..."}, "reason": "(if set)"}}
+```
+
+`status` is the lowercased phase (`pending`, `creating`, `running`, `failed`, `terminating`).
+The controller can publish a phase twice with the same `event_id`, so clients should ignore repeats.
+
 Connecting to `/api/v1/ws`: browsers can't set `Authorization` on a WebSocket, so they pass the
 JWT as a subprotocol after the `dozlab.bearer` sentinel, and the server echoes only
 `dozlab.bearer`. Other clients can use `Authorization: Bearer <JWT>`. The options and
