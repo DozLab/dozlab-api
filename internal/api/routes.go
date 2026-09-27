@@ -100,9 +100,9 @@ func SetupRoutes(router *gin.Engine, db *database.Database) {
 			{
 				labs.GET("/", labHandler.GetLabs)
 				labs.POST("/", labHandler.CreateLab)
-				labs.GET("/:id", labHandler.GetLab)
-				labs.PUT("/:id", labHandler.UpdateLab)
-				labs.DELETE("/:id", labHandler.DeleteLab)
+				labs.GET("/:labId", labHandler.GetLab)
+				labs.PUT("/:labId", labHandler.UpdateLab)
+				labs.DELETE("/:labId", labHandler.DeleteLab)
 				
 				// Lab specifications routes with composite key support
 				labs.GET("/:labId/specs", labHandler.GetLabSpecs)
