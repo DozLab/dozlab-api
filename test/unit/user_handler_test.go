@@ -24,8 +24,10 @@ func setupUserHandler() (*handlers.UserHandler, *gorm.DB) {
 		panic("failed to connect database")
 	}
 	
-	db.AutoMigrate(&models.User{})
-	
+	if err := db.AutoMigrate(&models.User{}, &models.UserProgress{}); err != nil {
+		panic("failed to migrate database: " + err.Error())
+	}
+
 	mockDB := &database.Database{DB: db}
 	return handlers.NewUserHandler(mockDB), db
 }
@@ -90,11 +92,13 @@ func TestUserHandler_GetProfile(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, w.Code)
 
 			if tt.expectUser {
-				var response models.UserResponse
+				var response struct {
+					User models.UserResponse `json:"user"`
+				}
 				err := json.Unmarshal(w.Body.Bytes(), &response)
 				assert.NoError(t, err)
-				assert.Equal(t, testUser.Username, response.Username)
-				assert.Equal(t, testUser.Email, response.Email)
+				assert.Equal(t, testUser.Username, response.User.Username)
+				assert.Equal(t, testUser.Email, response.User.Email)
 			}
 		})
 	}
