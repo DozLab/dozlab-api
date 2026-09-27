@@ -69,9 +69,9 @@ DozLab implements **Kubernetes sidecar architecture** with:
 ### Lab Management
 - `GET /api/v1/labs` - List available labs
 - `POST /api/v1/labs` - Create new lab (admin)
-- `GET /api/v1/labs/{id}` - Get lab details
-- `PUT /api/v1/labs/{id}` - Update lab (admin)
-- `DELETE /api/v1/labs/{id}` - Delete lab (admin)
+- `GET /api/v1/labs/{labId}` - Get lab details
+- `PUT /api/v1/labs/{labId}` - Update lab (admin)
+- `DELETE /api/v1/labs/{labId}` - Delete lab (admin)
 
 ### Lab Specifications (Sidecar Support)
 - `GET /api/v1/labs/{labId}/specs` - Get all lab specs

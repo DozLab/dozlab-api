@@ -99,7 +99,7 @@ func (h *LabHandler) CreateLab(c *gin.Context) {
 }
 
 func (h *LabHandler) GetLab(c *gin.Context) {
-	labIDStr := c.Param("id")
+	labIDStr := c.Param("labId")
 	labID, err := uuid.Parse(labIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -137,7 +137,7 @@ func (h *LabHandler) GetLab(c *gin.Context) {
 }
 
 func (h *LabHandler) UpdateLab(c *gin.Context) {
-	labIDStr := c.Param("id")
+	labIDStr := c.Param("labId")
 	labID, err := uuid.Parse(labIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -240,7 +240,7 @@ func (h *LabHandler) UpdateLab(c *gin.Context) {
 }
 
 func (h *LabHandler) DeleteLab(c *gin.Context) {
-	labIDStr := c.Param("id")
+	labIDStr := c.Param("labId")
 	labID, err := uuid.Parse(labIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
