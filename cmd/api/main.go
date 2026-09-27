@@ -40,6 +40,9 @@ func run() error {
 	if cfg.JWTSecret == "" {
 		return errors.New("JWT_SECRET is required")
 	}
+	if cfg.RabbitMQ.URL == "" {
+		return errors.New("RABBITMQ_URL is required")
+	}
 
 	db, err := database.Initialize(databaseURL(cfg.Database))
 	if err != nil {

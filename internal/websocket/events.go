@@ -128,35 +128,48 @@ func (bus *RedisEventBus) Publish(ctx context.Context, event *Event) error {
 	}
 
 	// Store event in Redis with TTL if specified
-	if event.TTL > 0 {
-		key := fmt.Sprintf("event:%s", event.ID)
-		if err := bus.client.Set(ctx, key, eventData, event.TTL).Err(); err != nil {
-			// Non-fatal error - log but don't fail publish
-			fmt.Printf("Warning: failed to store event %s: %v\n", event.ID, err)
-		}
+	if err := bus.StoreEvent(ctx, event); err != nil {
+		// Non-fatal error - log but don't fail publish
+		fmt.Printf("Warning: failed to store event %s: %v\n", event.ID, err)
 	}
 
 	return nil
 }
 
+// StoreEvent keeps an event with a TTL in Redis so GetEvent can find it.
+// Events without a TTL are not stored.
+func (bus *RedisEventBus) StoreEvent(ctx context.Context, event *Event) error {
+	if event.TTL <= 0 {
+		return nil
+	}
+	eventData, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("failed to marshal event: %w", err)
+	}
+	return bus.client.Set(ctx, fmt.Sprintf("event:%s", event.ID), eventData, event.TTL).Err()
+}
+
 // PublishEvent is an alias for Publish for backward compatibility
 func (bus *RedisEventBus) PublishEvent(ctx context.Context, event interface{}) error {
-	// Convert generic event to *Event
+	return bus.Publish(ctx, ToEvent(event))
+}
+
+// ToEvent converts an *Event, an Event, or any other value (wrapped as a
+// "generic.event" payload) to an *Event.
+func ToEvent(event interface{}) *Event {
 	switch e := event.(type) {
 	case *Event:
-		return bus.Publish(ctx, e)
+		return e
 	case Event:
-		return bus.Publish(ctx, &e)
+		return &e
 	default:
-		// Create a generic event wrapper
-		genericEvent := &Event{
+		return &Event{
 			ID:        fmt.Sprintf("generic_%d", time.Now().UnixNano()),
 			Type:      "generic.event",
 			Source:    "unknown",
 			Data:      map[string]interface{}{"payload": event},
 			Timestamp: time.Now(),
 		}
-		return bus.Publish(ctx, genericEvent)
 	}
 }
 

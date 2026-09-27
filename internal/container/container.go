@@ -1,11 +1,13 @@
 package container
 
 import (
+	"errors"
 	"net/url"
 	"strconv"
 
 	"dozlab-backend/internal/config"
 	"dozlab-backend/internal/database"
+	"dozlab-backend/internal/messaging"
 	"dozlab-backend/internal/services"
 	"dozlab-backend/internal/websocket"
 	"k8s.io/client-go/dynamic"
@@ -28,8 +30,14 @@ type Container struct {
 	K8sClient    dynamic.Interface
 	WSManager    *websocket.Manager
 	WSService    *websocket.SessionService
+	// RedisEventBus stays for event storage (GetEvent) and session event streams
 	RedisEventBus *websocket.RedisEventBus
+	// RabbitEventBus carries EventBus publish/subscribe
+	RabbitEventBus *messaging.RabbitEventBus
 }
+
+// eventConsumerGroup names this service's RabbitMQ queue (dozlab.events.dozlab-api)
+const eventConsumerGroup = "dozlab-api"
 
 // NewContainer creates and wires up all dependencies
 func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.Interface) (*Container, error) {
@@ -46,8 +54,21 @@ func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.I
 	// Create validation service
 	validationService := services.NewValidationService(cfg)
 
+	// RabbitMQ carries publish/subscribe; Redis keeps stored events
+	rabbitEventBus, err := messaging.NewRabbitEventBus(messaging.Config{
+		URL:           cfg.RabbitMQ.URL,
+		ConsumerGroup: eventConsumerGroup,
+		Prefetch:      cfg.RabbitMQ.Prefetch,
+		MaxRetries:    cfg.RabbitMQ.MaxRetries,
+		RetryDelay:    cfg.RabbitMQ.RetryDelay,
+	})
+	if err != nil {
+		redisEventBus.Close()
+		return nil, err
+	}
+
 	// Initialize event bus service first (needed by other services)
-	eventBusService := services.NewEventBusService(redisEventBus)
+	eventBusService := services.NewEventBusService(rabbitEventBus, redisEventBus)
 
 	// Initialize services with dependency injection
 	labService := services.NewLabService(db)
@@ -71,7 +92,8 @@ func NewContainer(cfg *config.Config, db *database.Database, k8sClient dynamic.I
 		K8sClient:     k8sClient,
 		WSManager:     wsManager,
 		WSService:     wsService,
-		RedisEventBus: redisEventBus,
+		RedisEventBus:  redisEventBus,
+		RabbitEventBus: rabbitEventBus,
 	}
 
 	return container, nil
@@ -91,10 +113,12 @@ func redisURL(cfg *config.Config) string {
 
 // Close gracefully shuts down all services
 func (c *Container) Close() error {
-	if c.RedisEventBus != nil {
-		if err := c.RedisEventBus.Close(); err != nil {
-			return err
-		}
+	var errs []error
+	if c.RabbitEventBus != nil {
+		errs = append(errs, c.RabbitEventBus.Close())
 	}
-	return nil
+	if c.RedisEventBus != nil {
+		errs = append(errs, c.RedisEventBus.Close())
+	}
+	return errors.Join(errs...)
 }
