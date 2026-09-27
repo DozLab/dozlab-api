@@ -9,10 +9,15 @@
 //	                            dead-letters to dozlab.events with key retry.<group>, so a
 //	                            retried message returns only to the group that failed it
 //	dozlab.events.dlq           durable quorum queue for messages that failed too often
+//	dozlab.events.<group>.instance.<id>
+//	                            per-process classic queue (not durable, deleted by the
+//	                            broker after instanceQueueExpiry without a consumer),
+//	                            bound to event types every instance must receive
 //
 // Consumers ack only after every handler succeeds. On failure the message is
 // republished to the group's retry queue with an incremented retry-count header;
 // once the count reaches the configured maximum it goes to the DLQ instead.
+// Instance queues have no retry queue: a failed message goes straight to the DLQ.
 package messaging
 
 import (
@@ -43,6 +48,15 @@ func QueueName(group string) string { return "dozlab.events." + group }
 
 // RetryQueueName is the retry queue of a consumer group.
 func RetryQueueName(group string) string { return QueueName(group) + ".retry" }
+
+// InstanceQueueName is the per-process queue of one instance of a consumer group.
+func InstanceQueueName(group, instanceID string) string {
+	return QueueName(group) + ".instance." + instanceID
+}
+
+// instanceQueueExpiry is how long an instance queue outlives its consumer, so it
+// survives a reconnect but is removed after its process is gone.
+const instanceQueueExpiry = 2 * time.Minute
 
 // retryRoutingKey routes a message from a group's retry queue back to that group only.
 func retryRoutingKey(group string) string { return "retry." + group }
@@ -89,6 +103,25 @@ func declareGroup(ch declarer, group string, eventTypes []string, retryDelay tim
 
 	keys := append([]string{retryRoutingKey(group)}, eventTypes...)
 	for _, key := range keys {
+		if err := ch.QueueBind(queue, key, ExchangeName, false, nil); err != nil {
+			return fmt.Errorf("bind %s to %s: %w", queue, key, err)
+		}
+	}
+	return nil
+}
+
+// declareInstance declares an instance queue and binds it to eventTypes. It is
+// a classic queue, not durable: it holds events for connections that live only
+// as long as the process.
+func declareInstance(ch declarer, queue string, eventTypes []string) error {
+	args := amqp.Table{
+		"x-queue-type": "classic",
+		"x-expires":    instanceQueueExpiry.Milliseconds(),
+	}
+	if _, err := ch.QueueDeclare(queue, false, false, false, false, args); err != nil {
+		return fmt.Errorf("declare queue %s: %w", queue, err)
+	}
+	for _, key := range eventTypes {
 		if err := ch.QueueBind(queue, key, ExchangeName, false, nil); err != nil {
 			return fmt.Errorf("bind %s to %s: %w", queue, key, err)
 		}

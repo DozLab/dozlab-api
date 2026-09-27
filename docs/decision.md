@@ -83,7 +83,9 @@ new WebSocket(`wss://api.example/api/v1/ws?token=${accessToken}`);
 - **Delivery is best-effort to connected clients.** If the user has no open connection, the
   consumer acks and drops the notification. There's no inbox or replay; storing notifications
   would be a separate feature.
-- **Single replica.** Every API replica shares the queue `dozlab.events.dozlab-api`, so each
-  notification reaches only one replica. Users connected to the other replicas miss it. With
-  more than one replica, each replica needs its own queue (e.g. an exclusive per-instance queue
-  bound to `notification`) or a shared connection registry.
+- **One queue per replica** (added after this decision). Each API process consumes
+  notifications from its own queue, `dozlab.events.dozlab-api.instance.<hostname>-<random>`, so
+  every replica receives every notification and delivers it to the sockets it holds. It is a
+  non-durable classic queue with `x-expires` of 2 minutes rather than an exclusive queue, so it
+  survives a reconnect to the broker but is deleted once its process is gone. The sockets die
+  with the process anyway, so there's nothing to keep.

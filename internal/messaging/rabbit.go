@@ -2,10 +2,13 @@ package messaging
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -41,6 +44,9 @@ type Config struct {
 	// PublishTimeout bounds a publish (including its confirm) when the caller's
 	// context has no deadline. Defaults to 10s.
 	PublishTimeout time.Duration
+	// InstanceID names this process's instance queue (SubscribeInstance).
+	// Defaults to <hostname>-<random>, so every process gets its own queue.
+	InstanceID string
 }
 
 func (c Config) validate() error {
@@ -72,11 +78,13 @@ type RabbitEventBus struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // supervisor and consumer goroutines
 
-	mu         sync.RWMutex
-	handlers   map[websocket.EventType][]websocket.EventHandler
-	eventTypes map[string]bool // event types bound to this group's queue
-	consuming  bool
-	closed     bool
+	mu                sync.RWMutex
+	handlers          map[websocket.EventType][]websocket.EventHandler
+	eventTypes        map[string]bool // event types bound to this group's queue
+	instanceTypes     map[string]bool // event types bound to this instance's queue
+	consuming         bool
+	instanceConsuming bool
+	closed            bool
 
 	connMu sync.Mutex
 	conn   *amqp.Connection
@@ -89,17 +97,21 @@ func NewRabbitEventBus(cfg Config) (*RabbitEventBus, error) {
 	if cfg.PublishTimeout <= 0 {
 		cfg.PublishTimeout = defaultPublishTimeout
 	}
+	if cfg.InstanceID == "" {
+		cfg.InstanceID = defaultInstanceID()
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("rabbitmq config: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	bus := &RabbitEventBus{
-		cfg:        cfg,
-		ctx:        ctx,
-		cancel:     cancel,
-		handlers:   make(map[websocket.EventType][]websocket.EventHandler),
-		eventTypes: make(map[string]bool),
+		cfg:           cfg,
+		ctx:           ctx,
+		cancel:        cancel,
+		handlers:      make(map[websocket.EventType][]websocket.EventHandler),
+		eventTypes:    make(map[string]bool),
+		instanceTypes: make(map[string]bool),
 	}
 
 	conn, err := bus.connect()
@@ -111,6 +123,26 @@ func NewRabbitEventBus(cfg Config) (*RabbitEventBus, error) {
 	bus.wg.Add(1)
 	go bus.supervise(conn)
 	return bus, nil
+}
+
+// defaultInstanceID is <hostname>-<8 random hex chars>. The hostname (the pod name
+// in Kubernetes) makes the queue recognisable; the suffix keeps two processes on
+// one host, or a restarted process, from sharing a queue.
+func defaultInstanceID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "instance"
+	}
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		return fmt.Sprintf("%s-%d", host, time.Now().UnixNano())
+	}
+	return host + "-" + hex.EncodeToString(suffix)
+}
+
+// InstanceQueue is the name of this process's instance queue.
+func (b *RabbitEventBus) InstanceQueue() string {
+	return InstanceQueueName(b.cfg.ConsumerGroup, b.cfg.InstanceID)
 }
 
 // connect dials RabbitMQ and declares the base topology.
@@ -277,10 +309,10 @@ func (b *RabbitEventBus) Subscribe(ctx context.Context, eventTypes ...websocket.
 		b.mu.Unlock()
 		return ErrClosed
 	}
-	var keys []string
-	for _, t := range eventTypes {
-		b.eventTypes[string(t)] = true
-		keys = append(keys, string(t))
+	keys, err := addTypes(b.eventTypes, b.instanceTypes, eventTypes)
+	if err != nil {
+		b.mu.Unlock()
+		return err
 	}
 	startConsumer := !b.consuming
 	b.consuming = true
@@ -290,15 +322,101 @@ func (b *RabbitEventBus) Subscribe(ctx context.Context, eventTypes ...websocket.
 	}
 	b.mu.Unlock()
 
-	err := b.bind(keys)
+	sub := b.groupSubscription()
+	err = b.bind(sub, keys)
 	if startConsumer {
-		go b.runConsumer()
+		go b.runConsumer(sub)
 	}
 	return err
 }
 
-// bind declares the group's queues and binds keys on a short-lived channel.
-func (b *RabbitEventBus) bind(keys []string) error {
+// SubscribeInstance binds this process's own queue (InstanceQueue) to
+// eventTypes and starts consuming it. Unlike Subscribe, where the instances of
+// a group share one queue and each event reaches one of them, every instance
+// receives every event of these types. Use it for events that must reach state
+// held by each process, such as its WebSocket connections. A failed event goes
+// to the DLQ without retries. An event type can't be both group- and
+// instance-subscribed, since its handlers would then run twice.
+func (b *RabbitEventBus) SubscribeInstance(ctx context.Context, eventTypes ...websocket.EventType) error {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return ErrClosed
+	}
+	keys, err := addTypes(b.instanceTypes, b.eventTypes, eventTypes)
+	if err != nil {
+		b.mu.Unlock()
+		return err
+	}
+	startConsumer := !b.instanceConsuming
+	b.instanceConsuming = true
+	if startConsumer {
+		b.wg.Add(1)
+	}
+	b.mu.Unlock()
+
+	sub := b.instanceSubscription()
+	err = b.bind(sub, keys)
+	if startConsumer {
+		go b.runConsumer(sub)
+	}
+	return err
+}
+
+// addTypes records eventTypes in dst, refusing any already in other.
+// Callers hold b.mu.
+func addTypes(dst, other map[string]bool, eventTypes []websocket.EventType) ([]string, error) {
+	keys := make([]string, 0, len(eventTypes))
+	for _, t := range eventTypes {
+		if other[string(t)] {
+			return nil, fmt.Errorf("event type %q is already subscribed on the other queue (group vs instance)", t)
+		}
+		keys = append(keys, string(t))
+	}
+	for _, k := range keys {
+		dst[k] = true
+	}
+	return keys, nil
+}
+
+// subscription is a queue this bus consumes: the group queue or the instance queue.
+type subscription struct {
+	name       string // for logs
+	queue      string
+	maxRetries int // 0: a failed message goes straight to the DLQ
+	// declare declares the queue and binds it to keys.
+	declare func(ch declarer, keys []string) error
+	// types returns every event type bound so far, to re-declare on reconnect.
+	types func() []string
+}
+
+func (b *RabbitEventBus) groupSubscription() subscription {
+	return subscription{
+		name:       "group " + b.cfg.ConsumerGroup,
+		queue:      QueueName(b.cfg.ConsumerGroup),
+		maxRetries: b.cfg.MaxRetries,
+		declare: func(ch declarer, keys []string) error {
+			return declareGroup(ch, b.cfg.ConsumerGroup, keys, b.cfg.RetryDelay)
+		},
+		types: func() []string { return b.sortedTypes(b.eventTypes) },
+	}
+}
+
+func (b *RabbitEventBus) instanceSubscription() subscription {
+	queue := b.InstanceQueue()
+	return subscription{
+		name:       "instance " + b.cfg.InstanceID,
+		queue:      queue,
+		maxRetries: 0,
+		declare: func(ch declarer, keys []string) error {
+			return declareInstance(ch, queue, keys)
+		},
+		types: func() []string { return b.sortedTypes(b.instanceTypes) },
+	}
+}
+
+// bind declares sub's queue and binds keys on a short-lived channel.
+func (b *RabbitEventBus) bind(sub subscription, keys []string) error {
 	b.connMu.Lock()
 	conn := b.conn
 	b.connMu.Unlock()
@@ -310,14 +428,14 @@ func (b *RabbitEventBus) bind(keys []string) error {
 		return fmt.Errorf("open channel: %w", err)
 	}
 	defer ch.Close()
-	return declareGroup(ch, b.cfg.ConsumerGroup, keys, b.cfg.RetryDelay)
+	return sub.declare(ch, keys)
 }
 
-func (b *RabbitEventBus) boundTypes() []string {
+func (b *RabbitEventBus) sortedTypes(types map[string]bool) []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	keys := make([]string, 0, len(b.eventTypes))
-	for k := range b.eventTypes {
+	keys := make([]string, 0, len(types))
+	for k := range types {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -339,13 +457,13 @@ func (b *RabbitEventBus) dispatch(ctx context.Context, event *websocket.Event) e
 	return errors.Join(errs...)
 }
 
-// runConsumer consumes the group's queue until Close, restarting with backoff
+// runConsumer consumes sub's queue until Close, restarting with backoff
 // when the channel or connection drops.
-func (b *RabbitEventBus) runConsumer() {
+func (b *RabbitEventBus) runConsumer(sub subscription) {
 	defer b.wg.Done()
 	p := &processor{
 		group:      b.cfg.ConsumerGroup,
-		maxRetries: b.cfg.MaxRetries,
+		maxRetries: sub.maxRetries,
 		dispatch:   b.dispatch,
 		pub:        b,
 		moveCtx: func() (context.Context, context.CancelFunc) {
@@ -355,14 +473,14 @@ func (b *RabbitEventBus) runConsumer() {
 
 	backoff := initialBackoff
 	for {
-		started, err := b.consumeOnce(p)
+		started, err := b.consumeOnce(sub, p)
 		if b.ctx.Err() != nil {
 			return
 		}
 		if started {
 			backoff = initialBackoff
 		}
-		log.Printf("rabbitmq: consumer stopped: %v; restarting in %s", err, backoff)
+		log.Printf("rabbitmq: %s consumer stopped: %v; restarting in %s", sub.name, err, backoff)
 		if !b.sleep(backoff) {
 			return
 		}
@@ -370,9 +488,9 @@ func (b *RabbitEventBus) runConsumer() {
 	}
 }
 
-// consumeOnce opens a channel, declares the group topology and processes
-// deliveries until the channel closes. started reports whether consuming began.
-func (b *RabbitEventBus) consumeOnce(p *processor) (started bool, err error) {
+// consumeOnce opens a channel, declares sub's queue and processes deliveries
+// until the channel closes. started reports whether consuming began.
+func (b *RabbitEventBus) consumeOnce(sub subscription, p *processor) (started bool, err error) {
 	b.connMu.Lock()
 	conn := b.conn
 	b.connMu.Unlock()
@@ -389,10 +507,10 @@ func (b *RabbitEventBus) consumeOnce(p *processor) (started bool, err error) {
 	if err := ch.Qos(b.cfg.Prefetch, 0, false); err != nil {
 		return false, fmt.Errorf("set prefetch: %w", err)
 	}
-	if err := declareGroup(ch, b.cfg.ConsumerGroup, b.boundTypes(), b.cfg.RetryDelay); err != nil {
+	if err := sub.declare(ch, sub.types()); err != nil {
 		return false, err
 	}
-	deliveries, err := ch.ConsumeWithContext(b.ctx, QueueName(b.cfg.ConsumerGroup), "", false, false, false, false, nil)
+	deliveries, err := ch.ConsumeWithContext(b.ctx, sub.queue, "", false, false, false, false, nil)
 	if err != nil {
 		return false, fmt.Errorf("consume: %w", err)
 	}

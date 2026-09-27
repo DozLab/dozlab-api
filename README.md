@@ -159,6 +159,8 @@ declared on startup and is idempotent:
 - `dozlab.events.dozlab-api`: durable quorum queue for this service, bound to the event types it subscribes to.
 - `dozlab.events.dozlab-api.retry`: failed messages wait here for `RABBITMQ_RETRY_DELAY`, then
   dead-letter back to `dozlab.events` with key `retry.dozlab-api`, so they return only to this service.
+- `dozlab.events.dozlab-api.instance.<id>`: per-process queue for events every replica must see
+  (`SubscribeInstance`); see the notifications section below.
 - `dozlab.events.dlq`: messages that failed `RABBITMQ_MAX_RETRIES` times (headers
   `x-dozlab-last-error`, `x-dozlab-consumer-group`, `x-dozlab-original-routing-key`).
 
@@ -171,10 +173,13 @@ more than once for one event, so they should be idempotent.
 the caller's `sender_id` in `data`. It returns 200 with the `event_id` once the broker confirms
 the message, and 503 if publishing fails.
 
-The API consumes them itself: on startup it binds `notification` to `dozlab.events.dozlab-api`
-and pushes each event to the target user's open connections on `GET /api/v1/ws`. Delivery is
-best-effort. If the user isn't connected, the event is acked and dropped. With more than one API
-replica, each notification reaches only one of them (see `docs/decision.md`).
+The API consumes them itself and pushes each event to the target user's open connections on
+`GET /api/v1/ws`. Each API process has its own queue, `dozlab.events.dozlab-api.instance.<id>`
+(`<id>` is `<hostname>-<random>`), bound to `notification`, so every replica receives every
+notification and delivers it to the connections it holds. The queue is a non-durable classic
+queue: it survives a reconnect, and the broker deletes it 2 minutes after its process stops
+consuming. Delivery is best-effort. If the user isn't connected, the event is acked and dropped,
+and a failed handler sends the event to `dozlab.events.dlq` without retries.
 
 Connecting to `/api/v1/ws`: browsers can't set `Authorization` on a WebSocket, so they pass the
 JWT as a subprotocol after the `dozlab.bearer` sentinel, and the server echoes only
