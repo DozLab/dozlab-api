@@ -17,6 +17,8 @@ type authService struct {
 	jwtSecret string
 }
 
+// NewAuthService returns an AuthService that stores users in db, publishes auth events to
+// eventBus and signs tokens with jwtSecret.
 func NewAuthService(db *database.Database, eventBus EventBusService, jwtSecret string) AuthService {
 	return &authService{
 		db:        db,

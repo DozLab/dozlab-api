@@ -47,6 +47,7 @@ func SetupRoutes(router *gin.Engine, db *database.Database) {
 	userHandler := handlers.NewUserHandler(db)
 	labHandler := handlers.NewLabHandler(db)
 	authHandler := handlers.NewAuthHandler(db)
+	hostCheckHandler := handlers.NewHostCheckHandler()
 	
 	// Initialize CRD-based lab session handler
 	var labSessionHandler *handlers.LabSessionHandler
@@ -132,6 +133,9 @@ func SetupRoutes(router *gin.Engine, db *database.Database) {
 					labSessions.DELETE("/:id", labSessionHandler.DeleteLabSession)
 				}
 			}
+
+			// Host capacity check against lab session resource requests
+			protected.POST("/host-check", hostCheckHandler.CheckHost)
 
 			// Progress routes
 			progress := protected.Group("/progress")

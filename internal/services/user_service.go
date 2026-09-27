@@ -15,6 +15,7 @@ type userService struct {
 	eventBus EventBusService
 }
 
+// NewUserService returns a UserService backed by db that publishes user events to eventBus.
 func NewUserService(db *database.Database, eventBus EventBusService) UserService {
 	return &userService{
 		db:       db,

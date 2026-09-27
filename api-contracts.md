@@ -96,6 +96,35 @@ DozLab implements **Kubernetes sidecar architecture** with:
 - `GET /api/v1/k8s/environments/{environment_id}/logs` - Get environment logs
 - `GET /api/v1/k8s/sessions/{session_id}/endpoints` - Get session service endpoints
 
+### Host Capacity
+- `POST /api/v1/host-check` - Check whether a host can run N lab sessions (auth required)
+
+Request (`requests` uses the LabSession `resources` shape, Kubernetes quantities; `sessions`
+defaults to 1, `require_kvm` to true, `headroom`, the fraction reserved for the OS/kubelet, to 0.2):
+
+```json
+{
+  "requests": {"cpu": "500m", "memory": "2Gi", "storage": "10Gi"},
+  "host": {"cpu_cores": 8, "memory": "32Gi", "free_storage": "200Gi", "kvm": true},
+  "sessions": 1, "require_kvm": true, "headroom": 0.2
+}
+```
+
+Response `200` (`ok` is false when the host falls short or a host field is unknown; CPU in cores,
+memory/storage in GiB; `kvm` is omitted when not required). Invalid quantities or options give `400`.
+
+```json
+{
+  "ok": true,
+  "cpu": {"need": 0.5, "usable": 6.4, "pass": true},
+  "memory_gib": {"need": 2, "usable": 25.6, "pass": true},
+  "storage_gib": {"need": 10, "usable": 160, "pass": true},
+  "kvm": {"need": true, "have": true, "pass": true},
+  "unknown_fields": [],
+  "max_sessions": 12
+}
+```
+
 ### Terminal Integration
 - `GET /api/v1/terminal` - WebSocket terminal connection (upgrade)
 - `GET /api/v1/terminal/{session_id}/status` - Get terminal session status
