@@ -39,6 +39,18 @@ func TestSessionStatusConstantsAllowed(t *testing.T) {
 	}
 }
 
+func TestNeedsK8sDelete(t *testing.T) {
+	for s, want := range map[string]bool{
+		SessionStatusPending: true, SessionStatusRunning: true,
+		SessionStatusFailed: true, SessionStatusExpired: true,
+		SessionStatusCompleted: false,
+	} {
+		if got := needsK8sDelete(s); got != want {
+			t.Errorf("needsK8sDelete(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
 func TestIsActiveSessionStatus(t *testing.T) {
 	for s, want := range map[string]bool{
 		SessionStatusPending: true, SessionStatusRunning: true,
