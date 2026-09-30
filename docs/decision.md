@@ -928,6 +928,32 @@ A: one repo, one workflow, nothing to sync.
 
 ## The tunnel: a public HTTPS URL without a domain
 
+### Why a tunnel is needed at all
+
+GitHub Pages can't reach the owner's machine by itself. Three things are in the way:
+
+1. **The frontend runs in the visitor's browser**, not on GitHub's servers. When someone clicks
+   "Open VS Code", *their browser* connects to the backend.
+2. **The backend is on a home network** at `192.168.1.91`, a private address. Nobody outside the LAN
+   can reach it: the router blocks incoming connections, and the home IP can change.
+3. **Browsers require HTTPS.** The Pages site is `https://`, and browsers refuse `http://` and `ws://`
+   calls from it (mixed content). Even a reachable home IP would need a TLS certificate, which
+   normally means buying a domain.
+
+A tunnel fixes all three: a **public address**, a **free HTTPS certificate**, and **no router
+port-forwarding**. The node connects *out* to the tunnel provider, which relays incoming traffic
+back over that connection.
+
+```
+Visitor's browser ──https──> Tailscale's servers ──tunnel──> the node ──> Traefik ──> code-server / API
+  (page from GitHub Pages)    (public URL + certificate)    (outbound connection, no open ports)
+```
+
+The trade-off: the URL is public, so anyone who has it reaches the API and the session routes
+(see "Security later").
+
+### Options
+
 | Option | URL | Notes |
 |---|---|---|
 | **Tailscale Funnel (chosen)** | `https://dozmanlab.taildc994d.ts.net` (stable) | Free with an account; the node is already logged in to the tailnet. The URL doesn't change, so the frontend doesn't need rebuilding |
@@ -992,8 +1018,14 @@ in the namespace the sessions run in. The URL must keep its trailing slash
 Tunnel, run once on the node (the Funnel config survives reboots):
 
 ```
-tailscale funnel --bg http://192.168.1.91:80
+tailscale funnel --bg http://192.168.1.91:80   # turn on
+tailscale funnel status                         # check
+tailscale funnel --https=443 off                # turn off
 ```
+
+The first run on a tailnet without Funnel prints a `login.tailscale.com` link: approve Funnel
+(and HTTPS certificates) for the node there, then run it again. Check the route end to end with
+`curl https://dozmanlab.taildc994d.ts.net/sessions/<id>/vscode/healthz` (200 from code-server).
 
 **The editor opens in a new tab, not an iframe.** code-server's password login sets a cookie. Inside
 an iframe on `dozlab.github.io`, that cookie belongs to another site (`ts.net`), and browsers
