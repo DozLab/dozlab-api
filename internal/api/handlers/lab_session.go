@@ -185,6 +185,7 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 			},
 		},
 	}
+	setLabImages(labSession, lab)
 
 	// Create lab session in Kubernetes
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -504,6 +505,16 @@ const (
 )
 
 // isActiveSessionStatus reports whether the session may still have Kubernetes resources
+// setLabImages makes the session boot the lab's own rootfs: the lab's init image goes into
+// spec.customImages.initImage, which the controller uses instead of its default.
+func setLabImages(labSession *unstructured.Unstructured, lab models.Lab) {
+	if lab.InitImage == nil || *lab.InitImage == "" {
+		return
+	}
+	spec := labSession.Object["spec"].(map[string]interface{})
+	spec["customImages"] = map[string]interface{}{"initImage": *lab.InitImage}
+}
+
 func isActiveSessionStatus(status string) bool {
 	return status == SessionStatusPending || status == SessionStatusRunning
 }

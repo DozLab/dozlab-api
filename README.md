@@ -112,7 +112,7 @@ docker run -d --name dozlab-redis -p 6379:6379 redis:7-alpine
 docker run -d --name dozlab-rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
 
 # Apply the schema (the server does not run migrations)
-docker exec -i dozlab-pg psql -U postgres -d dozlab < internal/database/migrations/001_initial_schema.up.sql
+for f in internal/database/migrations/*.up.sql; do docker exec -i dozlab-pg psql -U postgres -d dozlab < "$f"; done
 
 # Configure and run
 export JWT_SECRET=change-me-to-a-long-random-secret
@@ -377,7 +377,8 @@ docker/
 └── Dockerfile.workflow
 
 migrations/
-└── 001_initial_schema.up.sql
+├── 001_initial_schema.up.sql
+└── 002_lab_init_image.up.sql   # labs.init_image: the lab's rootfs init image
 
 docker-compose.dev.yml    # Development setup
 api-contracts.md         # Service communication specs

@@ -1,0 +1,1 @@
+ALTER TABLE labs DROP COLUMN IF EXISTS init_image;

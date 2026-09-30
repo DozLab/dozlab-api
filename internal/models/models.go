@@ -76,6 +76,9 @@ type Lab struct {
 	Category          *string    `json:"category,omitempty" db:"category" gorm:"type:varchar(50)"`
 	Tags              []string   `json:"tags,omitempty" db:"tags" gorm:"type:text[]"`
 	IsPublished       bool       `json:"is_published" db:"is_published" gorm:"default:false"`
+	// InitImage is the lab's rootfs init image (dozlab-rootfs-manager dozlab-init-<lab>); empty
+	// uses the controller's default. It becomes the LabSession's spec.customImages.initImage.
+	InitImage         *string    `json:"init_image,omitempty" db:"init_image" gorm:"type:varchar(255)"`
 	CreatedBy         *uuid.UUID `json:"created_by,omitempty" db:"created_by" gorm:"type:uuid;index"`
 	CreatedAt         time.Time  `json:"created_at" db:"created_at" gorm:"autoCreateTime"`
 	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at" gorm:"autoUpdateTime"`
