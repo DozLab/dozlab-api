@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -390,14 +391,16 @@ func (h *LabSessionHandler) DeleteLabSession(c *gin.Context) {
 		return
 	}
 
-	// Delete from Kubernetes if active
-	if isActiveSessionStatus(session.Status) {
+	// Delete from Kubernetes unless an earlier delete already did
+	if needsK8sDelete(session.Status) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		if err := h.k8sClient.Resource(h.labSessionGVR).Namespace("default").Delete(ctx, fmt.Sprintf("session-%s", sessionID.String()), metav1.DeleteOptions{}); err != nil {
 			// Log error but continue with database cleanup
-			fmt.Printf("Failed to delete K8s resources: %v\n", err)
+			if !k8serrors.IsNotFound(err) {
+				fmt.Printf("Failed to delete K8s resources: %v\n", err)
+			}
 		}
 	}
 
@@ -506,6 +509,13 @@ const (
 // isActiveSessionStatus reports whether the session may still have Kubernetes resources
 func isActiveSessionStatus(status string) bool {
 	return status == SessionStatusPending || status == SessionStatusRunning
+}
+
+// needsK8sDelete reports whether deleting the session must also delete its
+// LabSession. Failed and expired sessions keep their pod, PVCs and Service
+// until the LabSession is deleted; completed means the API already deleted it.
+func needsK8sDelete(status string) bool {
+	return status != SessionStatusCompleted
 }
 
 // convertPhaseToDBStatus maps a LabSession phase to a session status. It returns
