@@ -488,8 +488,8 @@ Gaps to fix before relying on it:
 ### Still to decide
 
 - ~~Who picks the mode~~: for now, instructors do; see
-  [Session options for end users](#session-options-for-end-users). The name and default of the
-  setting are still open.
+  [Session options for end users](#session-options-for-end-users). The setting is
+  `persistence`: `none` (default) or `files` (owner, 2026-09-30).
 - How long paused sessions are kept before cleanup.
 - Whether level 2 (snapshots) is needed, or level 1 is enough to start.
 
@@ -563,16 +563,142 @@ cluster's local-path storage these are directories on the node, and the size isn
 With the options in place, non-persistent VMs can skip `vm-data`, and a persistent VM's
 `vm-data` holds its writable disk (and snapshot files at option 3).
 
+### Keeping resources to a minimum
+
+**Owner decision (2026-09-30):** be conservative. Every VM starts at the smallest baseline that
+works, and only scales up for what a lab type's tools need. **The size is set on the lab**, in
+its definition, by the instructor who creates it. VMs take the lab's size; nobody picks CPU,
+memory or disk when creating a VM. Sizes change only with a measurement behind them.
+
+#### Measured (2026-09-30)
+
+Measured in Docker the way a lab pod runs (init container + `dozlab-firecracker`), with 1 vCPU
+and a 4G disk. "Used" is inside the VM, 20 s after SSH came up, with no student activity.
+
+| Lab | VM memory | Boot → SSH | Used in the VM | Result |
+|---|---|---|---|---|
+| vm | 1024 MiB | 5.5 s | 48 MiB | OK |
+| vm | 512 MiB | 5.0 s | 47 MiB | OK, no failed units |
+| vm | 256 MiB | 5.0 s | 46 MiB | boots, but cloud-init's locale step fails every time (`cloud-config.service`); generating the locale needs more memory |
+| vm | 128 MiB | 5.5 s | — | SSH answers once, then the VM stops responding at ~48% CPU: too small |
+| k8s | 2048 / 1024 / 512 MiB | 5.0–5.7 s | 70–73 MiB | boots; containerd runs. Not representative: nothing Kubernetes runs yet, and `br_netfilter` is missing from the guest kernel (4.14), so `systemd-modules-load` fails at every size |
+
+Other parts, idle:
+- `terminal-sidecar`: 10.7 MiB, 0% CPU (reserves 256 Mi today)
+- the controller: 9–12 MiB and 1–2m CPU per replica (reserves 256 Mi and 250m each, ×3 replicas)
+- `code-server`: not measured (the image isn't on this machine)
+
+**Less memory doesn't make the VM start slower.** Boot → SSH was about 5 s at every size. On the
+host, the Firecracker container counted 140–560 MiB. That figure includes the kernel's cache of
+the disk file, so it's higher than the VM's own use. The VM can never use more than its memory
+size plus the Firecracker process itself (not yet measured on its own).
+
+#### Where resources go today and aren't used
+
+| What | Reserved today | Used / needed | Note |
+|---|---|---|---|
+| VM container | 1 CPU, 3 Gi | VM of 1 vCPU and 1024 MiB; 47 MiB used idle | the lab's `resources` only change the container, not the VM: the VM is fixed at 1 vCPU / 1024 MiB (`vmCPUCount`, `vmMemoryMiB` in `resource_builder.go`) |
+| Terminal sidecar | 250m, 256 Mi | 10.7 MiB idle | |
+| code-server | 500m, 1 Gi | not measured | on every VM, even when a lab doesn't use the editor |
+| Per-VM volumes | `vm-data` 10 Gi + `vscode-data` 5 Gi | vm lab base 372 MB; a session writes what it writes | created for every VM, even non-persistent |
+| Temporary disk | limit 8 Gi (twice the 4 Gi disk) | | with the writable disk, base + writable is enough |
+| Controller | 3 replicas × 250m, 256 Mi | 1–2m, ~10 MiB each | only one replica works at a time (leader election) |
+| RabbitMQ | | | crash-looping (105 restarts in 8 h): its Erlang cookie file is readable by others (`/var/lib/rabbitmq/.erlang.cookie must be accessible by owner only`). Each restart costs CPU |
+
+#### The barest minimum (proposed, for the vm lab)
+
+Proposed baseline, to be confirmed under load (a student compiling, running tools) before it
+becomes the default:
+
+| Part | Request | Limit | Why |
+|---|---|---|---|
+| VM | 1 vCPU, **512 MiB** | | smallest size with no failures; 256 MiB may work once the locale is built into the image instead of generated at first boot |
+| VM container | 100m CPU, VM memory + Firecracker overhead (overhead to be measured) | 1 CPU, same memory | idle CPU was 0.2–2.5%; the limit lets it use its whole vCPU when busy |
+| Terminal sidecar | 10m CPU, 32 Mi | 100m, 64 Mi | 10.7 MiB idle; check with a few open terminals |
+| code-server | off unless the lab needs it | | a lab-level choice |
+| Writable disk | 1 Gi | | the base holds the OS; the writable disk only holds changes |
+| Volumes | none for non-persistent; `vm-data` sized to the writable disk for persistent | | `vscode-data` only when code-server is on |
+| Controller | 1 replica | | 3 are only needed for failover |
+
+What that means on this node (8 CPU, ~19.2 GiB, 20 KVM devices; 1.1 CPU and 1.15 GiB already
+reserved by the platform):
+
+| Per VM | Reserved per VM | VMs that fit | Limited by |
+|---|---|---|---|
+| Today | 1.75 CPU, 4.25 Gi | **3** | CPU |
+| Proposed minimum, no editor | ~0.11 CPU, ~0.6 Gi (+ Firecracker overhead) | **20** | KVM devices (20); memory would allow ~30 |
+| Proposed minimum + code-server as today | ~0.61 CPU, ~1.6 Gi | **11** | CPU and memory |
+
+Low CPU requests mean VMs share CPU when many are busy at once. They stay capped at their vCPU
+count, so a busy VM can't take more than its share, but a full class compiling together will be
+slower. That is the trade for fitting more VMs.
+
+#### Scaling up per lab type
+
+The lab's tools decide its size. Start from the baseline and add what the tools need. Measure
+each lab type before setting its size.
+
+| Lab type | Starting size | Status |
+|---|---|---|
+| vm (Linux, shell tools) | 1 vCPU, 512 MiB, 1 Gi writable | measured idle; confirm under load |
+| custom-initrd (tiny Alpine, 41 MB rootfs) | 1 vCPU, probably 128–256 MiB | not measured |
+| k8s | 2 vCPU, 2 GiB, 4 Gi writable: kubeadm's documented minimum for a control-plane node | idle measured only; can't run Kubernetes until the guest kernel has `br_netfilter` |
+| any lab + editor | add code-server | measure code-server |
+
+At what scale this matters: **from the first VM.** Today one VM reserves 4.25 Gi, so this node
+holds 3. The platform's own fixed costs (controller replicas, RabbitMQ) matter most on a small
+cluster like this one; per-VM sizes matter more as the number of VMs grows.
+
+#### Which options use more and which use less
+
+While running, every option reserves the same CPU and memory (the lab's size). They differ in
+storage, from least to most:
+
+1. **Non-persistent:** nothing after the VM stops.
+2. **Start from a prepared VM:** one prepared disk per lab, shared.
+3. **Fast start from a snapshot:** one snapshot per lab (its disk + the VM's memory).
+4. **Persistent, keep files:** each VM's written data until cleanup.
+5. **Save points:** 4, plus one copy of the written data per save point.
+6. **Pause and resume:** 4, plus **the VM's memory size** per paused VM. A 512 MiB VM means a
+   512 MiB snapshot, so a smaller VM also makes pausing faster and cheaper.
+
+A stopped or paused persistent VM reserves no CPU or memory, so pausing idle VMs frees room for
+others.
+
+#### Estimating what a lab needs
+
+For a lab with VM size `cpu_req`, `mem_req` (from the lab), writable data per VM `w`, and VM
+memory `m`:
+
+- **CPU and memory** = VMs running at the same time × (`cpu_req`, `mem_req`), plus the platform
+  (about 1.1 CPU and 1.15 GiB on this cluster today)
+- **KVM devices** = VMs running at the same time (20 per node here)
+- **Storage** = running non-persistent VMs × `w` (temporary)
+  + persistent VMs × `w`
+  + paused VMs × `m`
+  + save points × `w`
+  + per lab: the base image once per node (372 MB for vm), plus a prepared disk or snapshot if used
+
+Example: a vm lab for 30 students, persistent (keep files), 10 working at once, ~200 MB written
+each (an assumption, not measured):
+- today's sizes: 10 × 4.25 Gi = 42.5 Gi of memory reserved; this node holds 3, so 4 nodes
+- proposed minimum: 10 × ~0.6 Gi = ~6 Gi; fits on this node
+- storage: 30 × 200 MB = ~6 GB kept until cleanup
+
+The API's estimate (phase 1) uses the same formula with the lab's own sizes.
+
 ### What phase 1 needs in the API
 
 - **A role check.** The `instructor` role exists (`internal/models/models.go`, one of `admin`,
   `instructor`, `student`), but no route checks it today: any logged-in user, including
   students, can call `POST /api/v1/labs` and create sessions. Only `/api/v1/admin` routes check
   a role. Phase 1 lets `instructor` and `admin` create VMs with options, and keeps students
-  from setting them.
+  from setting them. **Only instructors and admins create labs** (owner, 2026-09-30):
+  `POST /api/v1/labs` gets the same role check.
 - **The options on VM creation.** `CreateLabSessionRequest` (`internal/api/handlers/lab_session.go`)
-  already takes `resources` and `config`. The option goes there (for example, `persistence`),
-  and down to the LabSession spec in the controller.
+  already takes `resources` and `config`. The option goes there as `config.persistence`
+  (`none`, the default, or `files`; owner, 2026-09-30), and down to the LabSession spec in the
+  controller. The other options get values when they're built.
 - **Clear wording in the UI.** When an instructor picks a persistent option, show the costs from
   [the notice above](#persistent-and-non-persistent-sessions) before the VM is created.
 - **Resources before and after creation.** Before creating a VM, show the instructor what it
