@@ -487,10 +487,57 @@ Gaps to fix before relying on it:
 
 ### Still to decide
 
-- Who picks the mode: the lab definition (for example, one lab always persistent), the student
-  per session, or both. The name and default of the setting.
+- ~~Who picks the mode~~: for now, instructors do; see
+  [Session options for end users](#session-options-for-end-users). The name and default of the
+  setting are still open.
 - How long paused sessions are kept before cleanup.
 - Whether level 2 (snapshots) is needed, or level 1 is enough to start.
+
+## Session options for end users
+
+These are the options DozLab can offer for a lab VM. They're listed so we can decide later which
+ones students actually need.
+
+### Rollout (owner decision, 2026-09-30)
+
+1. **Phase 1: instructors create VMs.** An instructor creates a lab VM and chooses its options
+   from the list below. Students don't choose anything yet.
+2. **Phase 2: what instructors give students.** Once instructors have used the options, decide
+   which ones an instructor hands to students for a task (for example, "this assignment is
+   persistent, with save points"), and whether students can choose any of them themselves.
+
+### The options
+
+| # | Option | What the user gets | What it costs them | Build status |
+|---|---|---|---|---|
+| 1 | **Non-persistent** (default) | a clean VM every start; work is gone when the VM stops | nothing extra; the fastest start | after option A is built |
+| 2 | **Persistent: keep files** (level 1) | files are there on return; the VM boots again | a longer first start (storage volume); stays on one node and one base image; storage until cleanup | after option A plus the disk on `vm-data` |
+| 3 | **Persistent: pause and resume** (level 2) | the VM comes back exactly as it was, with programs still running | everything in 2, plus a wait on pause (writes 1 GiB of memory) and more storage | needs the snapshot gaps fixed and a newer Firecracker |
+| 4 | **Save points** | named copies of the disk to go back to | storage per save point; the VM pauses briefly while each is taken | needs 2, plus disk-level snapshots |
+| 5 | **Start from a prepared VM** | an instructor sets up a VM (tools, files) once, and new VMs start from a copy of its disk | the copy step per new VM; the prepared disk is tied to one base image | needs 4 |
+| 6 | **Fast start from a snapshot** | a VM that's ready in about a second instead of booting | every copy shares SSH host keys and identity until per-session setup moves after restore | needs 3, plus that setup change |
+
+Options 1 and 2 are the first choice an instructor makes. Options 3–6 are extras on top of
+persistence, apart from 6, which also fits non-persistent labs.
+
+### What phase 1 needs in the API
+
+- **A role check.** The `instructor` role exists (`internal/models/models.go`, one of `admin`,
+  `instructor`, `student`), but no route checks it today: any logged-in user, including
+  students, can call `POST /api/v1/labs` and create sessions. Only `/api/v1/admin` routes check
+  a role. Phase 1 lets `instructor` and `admin` create VMs with options, and keeps students
+  from setting them.
+- **The options on VM creation.** `CreateLabSessionRequest` (`internal/api/handlers/lab_session.go`)
+  already takes `resources` and `config`. The option goes there (for example, `persistence`),
+  and down to the LabSession spec in the controller.
+- **Clear wording in the UI.** When an instructor picks a persistent option, show the costs from
+  [the notice above](#persistent-and-non-persistent-sessions) before the VM is created.
+
+### Decided in phase 2
+
+- Which options instructors give students, per lab or per assignment.
+- Whether students can pick any option themselves (for example, turning on persistence).
+- Limits per student: how many persistent VMs and save points, and how much storage.
 
 ## Separate decision: sharing the base
 
