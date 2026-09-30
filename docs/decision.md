@@ -874,3 +874,180 @@ Done in dozlab-infra #9:
 - ~~Where the custom kernel for the k8s lab is built (D)~~: dozlab-infra (#10).
 - ~~Whether to keep 5.10.245 as a fallback~~: documented in the Dockerfile as build arguments,
   not shipped in the image.
+
+# Decision: frontend on GitHub Pages, backend through a tunnel, code-server through Traefik
+
+- **Status:** accepted (2026-09-30, owner)
+- **Decision:** the Nuxt frontend is a static site on GitHub Pages at
+  `https://dozlab.github.io/dozlab-frontend/`. The browser calls the backend on the owner's machine
+  through Tailscale Funnel at `https://dozmanlab.taildc994d.ts.net`. Funnel sends everything to the
+  cluster's Traefik, which routes `/api` to dozlab-api and each session's code-server and terminal
+  by path. The controller creates one Ingress per session.
+- **Security is out of scope for now (owner decision).** The routes below have no auth in front of
+  them beyond what each service already does. See "Security later".
+
+## Context
+
+The owner doesn't want to pay for a domain or DNS. The question was whether VS Code Server
+(code-server) can run on GitHub Pages.
+
+**It can't.** Pages only serves static files (HTML, JS, CSS). It can't run code-server, the Go API
+or anything else. What can live on Pages is the **frontend**. The browser then talks straight to
+the backend, which is where code-server already runs (the `code-server` container, port 8080, in
+every lab pod: `dozlab-controller/internal/controller/resource_builder.go`).
+
+Constraints that follow:
+
+- **The backend needs a public HTTPS URL.** Pages is served over HTTPS, and browsers block `http://`
+  and `ws://` calls from an HTTPS page (mixed content). A home IP over plain HTTP won't work.
+- **The API must allow the Pages origin (CORS).** Before this change it sent no CORS headers.
+- **The frontend must call the API at an absolute URL.** Its stores called relative paths such as
+  `/api/labs`, which on Pages would go to github.io.
+
+```
+Browser ── https://dozlab.github.io/dozlab-frontend/   (static Nuxt build, GitHub Pages)
+   │
+   └── https / wss ──> https://dozmanlab.taildc994d.ts.net   (Tailscale Funnel, on the node)
+                          │
+                          └──> Traefik (k3s built-in, kube-system, node ports 80/443)
+                                 ├─ /api/*                     → dozlab-api
+                                 ├─ /sessions/<id>/vscode/*    → lab-service-<id>:8080  (prefix stripped)
+                                 └─ /sessions/<id>/terminal/*  → lab-service-<id>:8081  (prefix stripped)
+```
+
+## Where the frontend lives
+
+DozLab is a GitHub **organization**, so it gets `dozlab.github.io` free, with no domain or DNS.
+
+| Option | URL | What it takes |
+|---|---|---|
+| **A. Deploy from `dozlab-frontend` (chosen)** | `https://dozlab.github.io/dozlab-frontend/` | Pages on the existing repo plus an Actions workflow. Nuxt needs `app.baseURL: '/dozlab-frontend/'` because the site sits under a sub-path |
+| B. New repo `DozLab/dozlab.github.io` | `https://dozlab.github.io/` | Cleaner URL, but code in one repo and the build pushed to another: one more token and moving part |
+
+A: one repo, one workflow, nothing to sync.
+
+## The tunnel: a public HTTPS URL without a domain
+
+### Why a tunnel is needed at all
+
+GitHub Pages can't reach the owner's machine by itself. Three things are in the way:
+
+1. **The frontend runs in the visitor's browser**, not on GitHub's servers. When someone clicks
+   "Open VS Code", *their browser* connects to the backend.
+2. **The backend is on a home network** at `192.168.1.91`, a private address. Nobody outside the LAN
+   can reach it: the router blocks incoming connections, and the home IP can change.
+3. **Browsers require HTTPS.** The Pages site is `https://`, and browsers refuse `http://` and `ws://`
+   calls from it (mixed content). Even a reachable home IP would need a TLS certificate, which
+   normally means buying a domain.
+
+A tunnel fixes all three: a **public address**, a **free HTTPS certificate**, and **no router
+port-forwarding**. The node connects *out* to the tunnel provider, which relays incoming traffic
+back over that connection.
+
+```
+Visitor's browser ──https──> Tailscale's servers ──tunnel──> the node ──> Traefik ──> code-server / API
+  (page from GitHub Pages)    (public URL + certificate)    (outbound connection, no open ports)
+```
+
+The trade-off: the URL is public, so anyone who has it reaches the API and the session routes
+(see "Security later").
+
+### Options
+
+| Option | URL | Notes |
+|---|---|---|
+| **Tailscale Funnel (chosen)** | `https://dozmanlab.taildc994d.ts.net` (stable) | Free with an account; the node is already logged in to the tailnet. The URL doesn't change, so the frontend doesn't need rebuilding |
+| Cloudflare quick tunnel | `https://<random-words>.trycloudflare.com` | No account, but the URL changes on every restart, so the frontend's API URL goes stale |
+| ngrok | one free static domain | Another account and agent |
+
+Funnel only needs one target: Traefik on the node (`http://192.168.1.91:80`). Traefik does the
+routing, so the tunnel never changes when services are added.
+
+## Who proxies code-server: Traefik or dozlab-api
+
+Traefik is already running: it's the copy k3s installs itself (`kube-system/traefik`, LoadBalancer on
+`192.168.1.91` ports 80 and 443). Until this change it routed nothing (no Ingress or IngressRoute in
+the cluster). The Helm chart in `~/traefik` (chart 30.1.0, Traefik v3.1.2, downloaded 2024-08) is a
+stock copy, is not what's running, and isn't needed.
+
+### Chosen: Traefik, with the controller creating a per-session Ingress
+
+1. **It keeps the API out of the editor traffic.** Traffic splits into two kinds:
+   - **Control traffic** (API): short requests like login, "start a lab" or "list sessions".
+   - **Data traffic** (code-server and terminal): long-lived WebSockets carrying every keystroke,
+     file save and terminal byte.
+
+   If the API proxies code-server, it's in the path of all the data traffic: restarting or
+   redeploying the API drops every open editor, and heavy editor traffic competes with logins.
+   Traefik exists for this job and already runs.
+2. **The controller already follows this pattern.** For each `LabSession` it creates a PVC, a Pod
+   and a Service, each tied to the session with `SetControllerReference`. The Ingress is a fourth
+   resource built the same way: Kubernetes deletes it when the session is deleted, so there's no
+   cleanup code, and the route exists exactly as long as the lab does. With the API as proxy, the
+   API would have to look up pod addresses and handle ended sessions itself, which is state the
+   controller already manages.
+3. **Security can be added later without a redesign.** The API knows who owns which session, which is
+   the best argument for proxying there. Traefik's `forwardAuth` middleware can ask the API "may
+   this user open session X?" before letting a request through: the API stays the decision-maker
+   and Traefik still carries the traffic. This control plane / data plane split is common
+   (JupyterHub, for example, runs a separate proxy in front of each user's server).
+
+### Not chosen: dozlab-api as a reverse proxy
+
+One Go file (`httputil.ReverseProxy` handles WebSockets) and no Kubernetes changes. Quicker to a
+demo, but it's the choice most likely to be undone later, for the reasons above.
+
+## How it's built
+
+**Why the prefix is stripped.** code-server and the terminal sidecar serve from `/`. code-server
+uses relative URLs, so it works under any prefix as long as the proxy strips it before
+forwarding. Traefik does that with a `StripPrefixRegex` Middleware (`^/sessions/[^/]+/[^/]+`). The
+Middleware is a Traefik CRD, so the controller doesn't create it: the Helm chart creates it once in
+the labs namespace, and the controller only references it by annotation. Traefik only allows a
+Middleware from the Ingress's own namespace (k3s leaves `allowCrossNamespace` off), so it must live
+in the namespace the sessions run in. The URL must keep its trailing slash
+(`/sessions/<id>/vscode/`); without it code-server's relative paths resolve one level too high.
+
+| Repo | Change |
+|---|---|
+| dozlab-controller | `BuildIngress`: `lab-ingress-<id>`, two paths (`/sessions/<id>/vscode`, `/sessions/<id>/terminal`) to the session Service; class from `INGRESS_CLASS` (default `traefik`), Middleware annotation from `INGRESS_MIDDLEWARE`. `ensureIngress` after the Service, owner reference set, `Owns(&networkingv1.Ingress{})`. Status endpoints become `<PUBLIC_BASE_URL>/sessions/<id>/vscode/` and `.../terminal/` (a relative path when `PUBLIC_BASE_URL` is unset). RBAC for `networking.k8s.io/ingresses` |
+| dozlab-api | CORS middleware; allowed origins from `CORS_ALLOWED_ORIGINS` (comma-separated), default `https://dozlab.github.io,http://localhost:3000` |
+| dozlab-infra (Helm chart) | API Ingress by path (`/api`, host optional); the strip-prefix Middleware in the labs namespace; controller env `INGRESS_CLASS`, `INGRESS_MIDDLEWARE`, `PUBLIC_BASE_URL`; controller RBAC for Ingresses |
+| dozlab-frontend | Static build (`ssr: false`, `nuxt generate`), `app.baseURL` from `NUXT_APP_BASE_URL`, one `$fetch` client on `apiBase` with the JWT, store paths fixed to the API's `/api/v1/...` routes, an "Open VS Code" link from the session's endpoints, and a GitHub Actions workflow that deploys to Pages. `API_BASE_URL` is a repo variable |
+
+Tunnel, run once on the node (the Funnel config survives reboots):
+
+```
+tailscale funnel --bg http://192.168.1.91:80   # turn on
+tailscale funnel status                         # check
+tailscale funnel --https=443 off                # turn off
+```
+
+The first run on a tailnet without Funnel prints a `login.tailscale.com` link: approve Funnel
+(and HTTPS certificates) for the node there, then run it again. Check the route end to end with
+`curl https://dozmanlab.taildc994d.ts.net/sessions/<id>/vscode/healthz` (200 from code-server).
+
+**The editor opens in a new tab, not an iframe.** code-server's password login sets a cookie. Inside
+an iframe on `dozlab.github.io`, that cookie belongs to another site (`ts.net`), and browsers
+block third-party cookies, so the login would loop. In its own tab, the cookie is first-party and
+the password login works. An iframe becomes possible once auth moves to Traefik `forwardAuth` and
+code-server runs with `--auth none`.
+
+## Consequences and follow-ups
+
+- **Anyone with the Funnel URL reaches the API and every session's routes.** code-server still asks
+  for the session password; the terminal sidecar has no auth of its own.
+- **The per-session Service is still `type: LoadBalancer`.** On k3s, each one starts a `svclb` pod
+  that claims host ports 8080, 8081 and 22, so a second session's svclb can't be scheduled. With the
+  Ingress, the Service can be `ClusterIP`. Not changed here; left for its own change.
+- **The API isn't deployed in the local cluster yet** (only the controller is, and RabbitMQ is
+  crash-looping), so the `/api` route has no backend until it is.
+- **The frontend is an early skeleton.** Its response types (for example, login returns `tokens`,
+  not `token`) and several pages don't match the API yet. This change only fixes the paths it calls
+  and how it reaches the API.
+
+## Security later
+
+In order: code-server with `--auth none` behind Traefik `forwardAuth` to a new API endpoint that
+checks the JWT and session ownership (then iframes work too); the same for the terminal route;
+`CheckOrigin` on `/api/v1/ws` limited to the CORS origins; rate limits on `/api/v1/auth/*`.
