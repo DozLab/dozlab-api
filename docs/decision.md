@@ -652,7 +652,7 @@ cluster like this one; per-VM sizes matter more as the number of VMs grows.
 #### Why the k8s lab doesn't run Kubernetes
 
 Diagnosed 2026-09-30 by booting the k8s lab (2 vCPU, 2048 MiB; Kubernetes v1.30.14; guest kernel
-4.14.174). Three causes, in the order they'd be hit:
+4.14.174). The causes, in the order they'd be hit:
 
 1. **Nothing sets up the node.** No one runs `kubeadm init`, so the kubelet's config
    (`/var/lib/kubelet/config.yaml`) never exists and the kubelet restarts forever.
@@ -661,8 +661,14 @@ Diagnosed 2026-09-30 by booting the k8s lab (2 vCPU, 2048 MiB; Kubernetes v1.30.
 3. **The guest kernel is too old for cgroup v2.** The VM uses cgroup v2, but kernel 4.14 offers
    only the `io`, `memory` and `pids` controllers there, with no `cpu` or `cpuset`. Kubernetes
    documents kernel 5.8 or later for cgroup v2, so the kubelet is expected to fail its cgroup
-   checks, and CPU limits can't be enforced. Either a newer guest kernel (5.10+, already an owner
-   item) or booting with cgroup v1 (deprecated in Kubernetes).
+   checks, and CPU limits can't be enforced. **Owner chose a newer kernel (2026-09-30):**
+   dozlab-infra #8 moves to Firecracker's CI build of 5.10.245, which has the `cpu` and `cpuset`
+   controllers and boots on Firecracker v0.24 (the 6.1 build doesn't: it needs a newer
+   Firecracker). Tested: vm lab SSH in 4.5 s at 512 MiB, all controllers present.
+4. **Found after the kernel change: kube-proxy's iptables features.** Firecracker's CI kernels
+   (5.10 and 6.1) are built without `xt_comment`, `xt_statistic`, `xt_mark`, `xt_multiport` and
+   nf_tables, and without module support. kube-proxy uses these for Services, so a working k8s
+   lab needs a custom kernel build with them turned on. Where that's built is still open.
 
 **Not a cause:** `systemd-modules-load` fails on `br_netfilter`, but only because the image has no
 module files for 4.14 (it has `/lib/modules/5.15.0-194-generic` from an unused Ubuntu kernel).
