@@ -61,7 +61,9 @@ up() {
   docker run -d --name dozlab-e2e-pg -e POSTGRES_PASSWORD="$PG_PASSWORD" -e POSTGRES_DB=dozlab \
     -p 127.0.0.1:$PG_PORT:5432 postgres:16-alpine >/dev/null
   docker run -d --name dozlab-e2e-redis -p 127.0.0.1:$REDIS_PORT:6379 redis:7-alpine >/dev/null
-  for _ in $(seq 60); do docker exec dozlab-e2e-pg pg_isready -q -U postgres -d dozlab && break; sleep 0.5; done
+  # Over TCP: on first start the image runs a temporary server on the Unix socket only, before
+  # it creates the "dozlab" database; that one would pass a socket check too early.
+  for _ in $(seq 60); do docker exec dozlab-e2e-pg pg_isready -q -h 127.0.0.1 -U postgres -d dozlab && break; sleep 0.5; done
   for f in "$REPO"/internal/database/migrations/*.up.sql; do
     docker exec -i dozlab-e2e-pg psql -q -v ON_ERROR_STOP=1 -U postgres -d dozlab < "$f" >/dev/null
   done
