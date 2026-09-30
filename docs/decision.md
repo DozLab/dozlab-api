@@ -296,6 +296,202 @@ read-only base, that write moves to the writable disk (or a `cidata` drive).
 **Cost:** rootfs-manager #9 measured boot → SSH at 2.4 s before cloud-init and 5.6 s with it (vm lab). The
 writable disk doesn't change that; cloud-init's startup time is a separate open item in rootfs-manager #9.
 
+## Persistent and non-persistent sessions
+
+**The owner wants both (2026-09-30):** a session can be **non-persistent** (its disk is gone
+with the pod, as today) or **persistent** (the student can stop and continue where they left
+off). Option A supports both. The only difference is where `init.sh` puts the writable disk.
+
+> **Before you ask for a persistent session, know what it costs.**
+> - **A longer wait to start.** A persistent session needs its own storage volume, and the
+>   session can't be placed on a node until that volume is ready. A non-persistent session
+>   skips this and starts fastest. (Measured so far: 4–22 s to schedule with volumes vs about
+>   1 s without; see [Startup time](#startup-time).)
+> - **A wait when you stop.** Saving running programs (a snapshot) writes the VM's whole memory
+>   to disk, 1 GiB today, when the session is paused.
+> - **Resume isn't instant without a snapshot.** Without one, your files are kept but the VM
+>   boots again and your running programs are gone.
+> - **It's tied to one machine.** On the local cluster your saved session can only come back on
+>   the node that stored it. If that node is busy or down, you wait.
+> - **It stays on an old image.** Your session keeps the base image it started on and doesn't
+>   get updates to it.
+> - **It uses storage until it's deleted.** Paused sessions are removed after a cleanup period.
+>
+> If you don't need to come back to your work, choose non-persistent.
+
+| | Non-persistent | Persistent |
+|---|---|---|
+| Where the writable disk lives | the pod's `vm-kernels` emptyDir | the session's `vm-data` PVC |
+| What survives the pod | nothing | the student's files; with a snapshot, also running programs |
+| `init.sh` | always creates a new disk with the seed | creates it only if it isn't there yet; otherwise reuses it |
+| Works on the local cluster | yes | yes: `vm-data` is a normal filesystem volume on local-path. C's raw block volume isn't needed |
+
+### Two levels of "continue where they left off"
+
+1. **Keep the disk, cold boot on return.** The files are kept, and running programs are not. The
+   VM boots normally on the kept disk. cloud-init sees the same instance id, treats it as a reboot,
+   and keeps the SSH key and host keys. This needs no snapshot code.
+2. **Keep the disk and a snapshot.** On pause, Firecracker writes the VM's memory and CPU state
+   to the PVC next to the disk, then the pod is deleted. On resume, it restores from them, so
+   running programs continue too. `start-firecracker.sh` already has the snapshot create and
+   load calls (`SNAPSHOT_PATH`, `MEM_FILE_PATH`).
+
+Level 1 can ship first. Level 2 builds on it.
+
+### Startup time
+
+- **Having the option costs nothing at startup.** It's a choice of path in `init.sh` and the
+  controller.
+- **Non-persistent is the fastest mode.** The disk is on node-local emptyDir, and the controller
+  can skip the `vm-data` PVC for these sessions. That matters because every session creates two
+  PVCs today (`vm-data`, 10 Gi, and `vscode-data`, 5 Gi), and local-path is `WaitForFirstConsumer`:
+  the pod isn't scheduled until the volumes are provisioned. In the API e2e runs on 2026-09-30,
+  "pod scheduled" took 4–22 s with the two PVCs. The `dozlab.sh` test pod, which has only
+  emptyDirs, took about 1 s. That gap hasn't been split up yet, so some of it may not be the PVCs.
+- **Persistent, first start:** the same as today, because the `vm-data` PVC is already created
+  for every session. The writable disk on local-path is a directory on the node's disk, so it's
+  about as fast as emptyDir.
+- **Persistent, resume at level 1:** the PVC already exists, so there's no provisioning wait.
+  The VM boots normally, and cloud-init doesn't redo first-boot work like making host keys. Not
+  measured yet.
+- **Persistent, resume at level 2:** the boot is replaced by a snapshot restore, which is
+  expected to be well under a second. Pausing costs the time to write the memory file (1 GiB
+  for a 1024 MiB VM). Neither is measured yet.
+
+### Overhead of offering both
+
+- **Code:**
+  - a per-session setting in the LabSession spec
+  - two paths in the controller: disk location, and whether to create `vm-data`
+  - "create if missing" in `init.sh`
+  - for level 2, a `Paused` phase plus pause and resume actions in the controller and API
+- **Tests:** unit and e2e coverage for both modes, plus pause and resume.
+- **Storage:** a persistent session keeps its writable disk (sparse, so it grows with use up to
+  its size) until it's deleted. At level 2 it also keeps the memory file (the VM's memory size,
+  1 GiB today) and a small state file. Paused sessions need a cleanup rule, such as deletion
+  after N days.
+- **Operations:**
+  - Pinned to one node: local-path volumes live on one node, so a persistent session can only
+    resume on the node that created it. If that node is full or down, it can't resume until the
+    node is back. Moving sessions between nodes needs network storage.
+  - Base image upgrades: the writable disk is a layer over one exact base image. A persistent
+    session must keep booting the base version it started on, so old base versions are kept
+    while sessions use them.
+  - Snapshot compatibility: a level-2 snapshot also needs the same Firecracker version, CPU
+    type, drive paths and tap device name on restore. If they change, the session falls back to
+    a level-1 cold boot.
+
+### Trade-offs
+
+| | Non-persistent | Persistent |
+|---|---|---|
+| Startup | fastest: no PVC wait | first start as today; resume as fast as a boot (level 1) or faster (level 2) |
+| Student experience | starts clean every time; work is lost when the pod goes | continues where they stopped |
+| Storage cost | none after the pod ends | a disk per session (plus memory at level 2) until deleted |
+| Scheduling | any node | resume only on the node holding the disk (local-path) |
+| Upgrades | always the newest base | pinned to the base version it started on |
+| Complexity | lowest | more code, tests and cleanup, especially at level 2 |
+
+### Snapshots: disk level and VM level
+
+A Firecracker VM has two kinds of state, and each has its own kind of snapshot. They are taken
+separately and must be restored as a pair.
+
+#### Disk-level snapshot: the files
+
+- **What it captures:** the writable disk, meaning everything the session wrote to its
+  filesystem (the student's files, installed packages, cloud-init's state). The read-only base
+  isn't included; it's shared and never changes.
+- **How it's taken:** copy the writable disk file while nothing writes to it, meaning the VM is
+  paused or stopped. Firecracker only uses raw disk files (no qcow2), so the snapshot is a
+  plain file copy, sparse to keep it small. A filesystem with reflinks (XFS, btrfs) makes the
+  copy almost instant; ext4 copies the used blocks. Kubernetes `VolumeSnapshot` would work for
+  the whole PVC, but the local-path provisioner doesn't support it.
+- **Consistency:** if the VM is paused without flushing, recent writes may still be in the
+  guest's memory rather than on the disk. That's fine when the disk is restored together with
+  the matching memory snapshot. For a disk-only restore (a cold boot), run `sync` in the guest
+  first, or the files may be missing their last writes.
+- **Restore:** boot the VM normally on the saved disk (level 1). Files are back; running
+  programs are not.
+- **Size and time:** the size of the data the session wrote (sparse). Not measured yet.
+- **Also useful for:** backups, save points a student can go back to, and cloning a session.
+
+#### VM-level snapshot: the running machine
+
+- **What it captures:** the VM's CPU and device state (a small state file) and its whole memory
+  (the memory file, the size of the VM's memory: 1 GiB today). It does **not** include the
+  disks. It records their paths and expects them unchanged on restore.
+- **How it's taken:** pause the VM, then call Firecracker's `/snapshot/create`. A **Full**
+  snapshot writes all of memory. A **Diff** snapshot writes only the pages changed since the
+  last one, but needs dirty-page tracking turned on when the VM starts.
+- **Restore:** start a new Firecracker process, call `/snapshot/load` with the state and memory
+  files, then resume. Firecracker maps the memory file and loads pages as the guest touches
+  them, so the restore itself is quick and the first moments after it are a little slower.
+- **Requirements on restore:**
+  - the same disk files at the same paths, in exactly the state they were in at snapshot time
+  - the same Firecracker version, a compatible CPU type and the same tap device name
+- **Inside the guest after a restore:**
+  - The clock jumps by the time the session was paused, so the guest needs a time resync.
+  - Network connections that were open when it paused are dropped, for example the terminal's
+    SSH session, which reconnects.
+  - If one snapshot is restored more than once (the faster-startup use), every copy has the same
+    SSH host keys, random seed and cloud-init identity.
+
+#### Pause and resume together (level 2)
+
+On pause:
+1. Run `sync` in the guest, so a disk-only fallback is also safe.
+2. Pause the VM.
+3. Take the VM snapshot: the state file and the memory file.
+4. The writable disk is already on the PVC, and it's consistent because the VM is paused.
+5. Delete the pod.
+
+On resume:
+1. A new pod mounts the same PVC.
+2. `start-firecracker.sh` finds the snapshot files, loads them and resumes the VM.
+3. The guest resyncs its clock, and the terminal reconnects.
+
+If the restore is refused (a different Firecracker version or CPU), fall back to a level-1 cold
+boot on the same disk.
+
+| | Disk-level | VM-level |
+|---|---|---|
+| Captures | files on the writable disk | CPU, devices and memory (running programs) |
+| Size | data written by the session | the VM's memory size (1 GiB today); smaller with Diff |
+| Restore gives | a fresh boot with the files kept | the session exactly as it was |
+| Works alone | yes | no: needs the matching disk |
+| Survives upgrades | across Firecracker upgrades, yes (the base must stay the same) | needs the same Firecracker version and a compatible CPU |
+
+#### What exists today in `start-firecracker.sh` (dozlab-infra)
+
+- On start, if `SNAPSHOT_PATH` and `MEM_FILE_PATH` exist, it loads them and resumes instead of
+  booting.
+- On `SIGTERM`/`SIGINT` (pod deletion), if both are set, it pauses the VM, **deletes the previous
+  snapshot**, takes a new Full snapshot and kills Firecracker.
+
+Gaps to fix before relying on it:
+- **It runs during pod shutdown.** Writing 1 GiB has to finish within the pod's termination
+  grace period (30 s by default) or it's killed half-written.
+- **It deletes the old snapshot first.** If the new one fails, the session has neither. Write to
+  a temporary name and rename on success.
+- **It never syncs the guest.** A cold-boot fallback may lose recent writes.
+- **It doesn't check that the disks match.** A snapshot loaded against a different disk
+  corrupts the session.
+- **The image runs Firecracker v0.24.0 (2021)**, from before snapshots were stable (they were a
+  developer preview until 1.0). `mem_file_path` is the right field for that version; newer
+  versions use `mem_backend`. Upgrading Firecracker changes this code, and snapshots taken on
+  the old version can't be restored on the new one. So upgrade before persistent sessions
+  ship, not after.
+- **Pausing is tied to deleting the pod.** A pause action should take the snapshot first, then
+  delete the pod once it's written.
+
+### Still to decide
+
+- Who picks the mode: the lab definition (for example, one lab always persistent), the student
+  per session, or both. The name and default of the setting.
+- How long paused sessions are kept before cleanup.
+- Whether level 2 (snapshots) is needed, or level 1 is enough to start.
+
 ## Separate decision: sharing the base
 
 A read-only base only saves the copy if pods share it. If each pod still copies the base into
