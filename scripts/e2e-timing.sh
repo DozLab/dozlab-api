@@ -12,6 +12,8 @@
 # Each lab is a published row with its own init image (labs.init_image, which the API passes to
 # the controller as spec.customImages.initImage): E2E_IMAGE_VM / E2E_IMAGE_K8S, default
 # dozlab-init:local and dozman99/dozlab-init-k8s:local. The image must already be on the node.
+# Each lab row also sets its VM size (labs.vm_vcpus, vm_memory_mib, vm_disk_gib), which the
+# session gets: E2E_SIZE_VM / E2E_SIZE_K8S as "vCPUs MiB GiB", default "1 512 1" and "2 2048 4".
 # Each stage becomes one JSON line in $TIMINGS, in the same format as dozlab.sh's timings:
 #   {"run":"<id>","step":"<stage>","start":<epoch>,"end":<epoch>,"seconds":<n>,"status":"ok|failed"}
 set -euo pipefail
@@ -145,6 +147,10 @@ cleanup_session() {  # on failure or interrupt: don't leave a session behind
 }
 
 lab_image() { case $1 in vm) echo "${E2E_IMAGE_VM:-dozlab-init:local}" ;; k8s) echo "${E2E_IMAGE_K8S:-dozman99/dozlab-init-k8s:local}" ;; esac; }
+# Each lab's VM size, "vCPUs memory-MiB disk-GiB" (labs.vm_*; the session gets it from the lab).
+# k8s needs kubeadm's minimum (2 vCPUs, ~1.7 GiB) and room for its 1.4 GB rootfs.
+lab_size()  { case $1 in vm) echo "${E2E_SIZE_VM:-1 512 1}" ;; k8s) echo "${E2E_SIZE_K8S:-2 2048 4}" ;; esac; }
+pod_vm_env() { kubectl -n $NS get pod "lab-session-$SESSION" -o jsonpath="{.spec.containers[?(@.name==\"firecracker-vm\")].env[?(@.name==\"$1\")].value}"; }
 
 run() {
   load_env
@@ -153,22 +159,23 @@ run() {
   case "${1:-vm}" in all) labs="vm k8s" ;; vm|k8s) labs=$1 ;; *) die "usage: $0 run [vm|k8s|all]" ;; esac
   # Migrations run in 'up', before the API starts: changing a table under the running API breaks
   # its cached queries.
-  [[ -n "$(psql_q "SELECT 1 FROM information_schema.columns WHERE table_name = 'labs' AND column_name = 'init_image'")" ]] ||
-    die "the database predates labs.init_image; run '$0 up' again"
+  [[ -n "$(psql_q "SELECT 1 FROM information_schema.columns WHERE table_name = 'labs' AND column_name = 'vm_vcpus'")" ]] ||
+    die "the database predates labs.vm_vcpus (migration 003); run '$0 up' again"
   api POST /auth/register "$(jq -nc --arg p "$E2E_PASSWORD" '{username:"e2e-runner", email:"e2e-runner@dozlab.test", password:$p}')" >/dev/null 2>&1 || true
   local ts; ts=$(date +%Y%m%dT%H%M%S)
   for lab in $labs; do run_lab "$lab" "$ts-e2e-$lab"; done
 }
 
 run_lab() {
-  local lab=$1 image; image=$(lab_image "$1")
+  local lab=$1 image cpus mem disk; image=$(lab_image "$1"); read -r cpus mem disk <<<"$(lab_size "$1")"
   RUN_ID=$2 SESSION="" DELETED=""
   trap cleanup_session EXIT
 
-  say "$lab lab ($image)"
-  LAB_ID=$(psql_q "INSERT INTO labs (name, slug, description, is_published, init_image)
-    VALUES ('E2E $lab lab', 'e2e-$lab-lab', 'Lab session timing (scripts/e2e-timing.sh)', true, '$image')
-    ON CONFLICT (slug) DO UPDATE SET is_published = true, init_image = EXCLUDED.init_image RETURNING id;")
+  say "$lab lab ($image, $cpus vCPU, $mem MiB, $disk GiB)"
+  LAB_ID=$(psql_q "INSERT INTO labs (name, slug, description, is_published, init_image, vm_vcpus, vm_memory_mib, vm_disk_gib)
+    VALUES ('E2E $lab lab', 'e2e-$lab-lab', 'Lab session timing (scripts/e2e-timing.sh)', true, '$image', $cpus, $mem, $disk)
+    ON CONFLICT (slug) DO UPDATE SET is_published = true, init_image = EXCLUDED.init_image,
+      vm_vcpus = EXCLUDED.vm_vcpus, vm_memory_mib = EXCLUDED.vm_memory_mib, vm_disk_gib = EXCLUDED.vm_disk_gib RETURNING id;")
 
   local t body
   t=$(now); TOKEN=$(api POST /auth/login "$(jq -nc --arg p "$E2E_PASSWORD" '{username:"e2e-runner", password:$p}')" | jq -r .tokens.access_token)
@@ -176,9 +183,7 @@ run_lab() {
   [[ -n "$TOKEN" && "$TOKEN" != null ]] || die "login returned no token"
 
   local t0; t0=$(now); MARK=$t0
-  body=$(api POST /lab-sessions/ "$(jq -nc --arg lab "$LAB_ID" \
-    --arg m "${E2E_MEMORY:-}" --arg c "${E2E_CPU:-}" \
-    '{lab_id:$lab} + (if $m != "" or $c != "" then {resources:{memory:$m, cpu:$c}} else {} end)')")
+  body=$(api POST /lab-sessions/ "$(jq -nc --arg lab "$LAB_ID" '{lab_id:$lab}')")
   SESSION=$(jq -r .session.id <<<"$body")
   t=$(now); record "api: POST lab-session" "$MARK" "$t" ok; MARK=$t
   echo "session $SESSION"
@@ -194,6 +199,13 @@ run_lab() {
     FAILED="wrong init image"
     echo "  init-rootfs runs '$got', not '$image': the controller ignored the lab's image" \
       "(needs dozlab-controller#10 and the CRD from dozlab-infra#7)"
+  fi
+  # The VM must get the lab's size (an older controller runs every VM at 1 vCPU / 1024 MiB)
+  local vc vm; vc=$(pod_vm_env CPU_COUNT 2>/dev/null || true); vm=$(pod_vm_env MEMORY 2>/dev/null || true)
+  if [[ -z "$FAILED" && ( "$vc" != "$cpus" || "$vm" != "$mem" ) ]]; then
+    record "k8s: VM gets the lab's size" "$MARK" "$(now)" failed
+    FAILED="wrong VM size"
+    echo "  VM runs $vc vCPU / $vm MiB, not the lab's $cpus / $mem (needs dozlab-controller agent/vm-size-from-session)"
   fi
   [[ -n "$FAILED" ]] || {
     wait_for "k8s: pod scheduled"              pod_scheduled &&

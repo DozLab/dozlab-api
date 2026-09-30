@@ -186,6 +186,10 @@ func (h *LabHandler) UpdateLab(c *gin.Context) {
 		Category          *string  `json:"category,omitempty"`
 		Tags              []string `json:"tags,omitempty"`
 		IsPublished       *bool    `json:"is_published,omitempty"`
+		// VM size for the lab's sessions; same limits as models.Lab
+		VMVCPUs     *int `json:"vm_vcpus,omitempty" binding:"omitempty,min=1,max=8"`
+		VMMemoryMiB *int `json:"vm_memory_mib,omitempty" binding:"omitempty,min=256,max=16384"`
+		VMDiskGiB   *int `json:"vm_disk_gib,omitempty" binding:"omitempty,min=1,max=100"`
 	}
 
 	var req UpdateLabRequest
@@ -219,6 +223,15 @@ func (h *LabHandler) UpdateLab(c *gin.Context) {
 	}
 	if req.IsPublished != nil {
 		updates["is_published"] = *req.IsPublished
+	}
+	if req.VMVCPUs != nil {
+		updates["vm_vcpus"] = *req.VMVCPUs
+	}
+	if req.VMMemoryMiB != nil {
+		updates["vm_memory_mib"] = *req.VMMemoryMiB
+	}
+	if req.VMDiskGiB != nil {
+		updates["vm_disk_gib"] = *req.VMDiskGiB
 	}
 
 	if len(updates) > 0 {
