@@ -426,3 +426,22 @@ Each service exposes:
 ---
 
 **DozLab**: Cloud-native education platform built for scale, reliability, and developer experience. 🚀
+
+## End-to-end timing
+
+`scripts/e2e-timing.sh` starts a lab session through the API the way a user does and times
+every stage, from `POST /api/v1/lab-sessions` to the VM answering SSH and the API reporting
+`Running`, then from `DELETE` to the pod, LabSession and SSH key Secret being gone.
+
+```bash
+export KUBECONFIG=~/.kube/dozlab-local.yaml
+scripts/e2e-timing.sh up          # Postgres + Redis in Docker, migrations, RabbitMQ port-forward, API
+scripts/e2e-timing.sh run all     # vm and k8s labs (or: run vm / run k8s)
+scripts/e2e-timing.sh down
+```
+
+Each lab is seeded as a published row with its own init image (`E2E_IMAGE_VM`,
+`E2E_IMAGE_K8S`). The run fails fast if the pod doesn't run that image. Each stage is
+appended to `$TIMINGS` as one JSON line (`~/.dozlab-local/timings.jsonl` when it exists, the
+same format as dozlab.sh's lab timings).
+
