@@ -520,6 +520,49 @@ ones students actually need.
 Options 1 and 2 are the first choice an instructor makes. Options 3–6 are extras on top of
 persistence, apart from 6, which also fits non-persistent labs.
 
+### Resources each option uses
+
+An instructor should see what a VM will take before creating it. The numbers below are the
+controller's defaults on `main` (`internal/controller/resource_builder.go`,
+`pod_settings.go`). A lab can change CPU, memory, disk size and storage, so the UI should show
+the lab's actual values. They're listed as resources rather than money so a price per unit can
+be attached later.
+
+**While a VM is running, every option uses the same CPU and memory.** Each VM is one pod with
+three containers:
+
+| Container | Reserved (request) | Maximum (limit) | What it's for |
+|---|---|---|---|
+| `firecracker-vm` | 1 CPU, 3 Gi | 2 CPU, 4 Gi | runs the VM; the VM itself gets 1 vCPU and 1024 MiB |
+| `terminal-sidecar` | 250m CPU, 256 Mi | 500m CPU, 512 Mi | the browser terminal (SSH into the VM) |
+| `code-server` | 500m CPU, 1 Gi | 1 CPU, 2 Gi | the browser editor |
+| **Total per running VM** | **1.75 CPU, 4.25 Gi** | **3.5 CPU, 6.5 Gi** | plus one `/dev/kvm` and one `/dev/net/tun` from the node |
+
+Reserved is what the cluster sets aside for the VM, so it's what limits how many VMs fit on a
+node. The VM container reserves 3 Gi for a VM with 1 GiB of memory; lowering that is a separate
+change that would fit more VMs on a node.
+
+**The options differ in storage and in time.** Disk sizes use the defaults: 4 Gi writable disk
+and the vm lab's base (362 MB with cloud-init; the k8s lab's is 1.4 GB).
+
+| # | Option | Storage while running | Storage after the VM stops | Extra time |
+|---|---|---|---|---|
+| 1 | Non-persistent | base + writable disk up to 4 Gi, in node-local temporary space (limit 8 Gi) | **none** | none; fastest start |
+| 2 | Persistent: keep files | base + writable disk up to 4 Gi on the `vm-data` volume | the writable disk (only what was written, up to 4 Gi) until cleanup | first start waits for the volume; each return is a full boot |
+| 3 | Persistent: pause and resume | as 2 | as 2, **plus 1 GiB** of memory and a small state file per paused VM | pausing writes 1 GiB; resume is expected to be under a second |
+| 4 | Save points | as 2 | as 2, plus one copy of the written data per save point | a short pause per save point |
+| 5 | Start from a prepared VM | as 1 or 2 | one prepared disk per lab, shared by all its VMs | copying the prepared disk for each new VM |
+| 6 | Fast start from a snapshot | as 1 or 2 | one snapshot per lab: its disk plus 1 GiB of memory | about a second to start instead of a boot |
+
+**While a persistent VM is stopped or paused, it uses no CPU or memory**, only storage. Pausing
+a VM a student isn't using frees 1.75 CPU and 4.25 Gi for others.
+
+**Volumes today:** every session creates two volumes whatever the option: `vm-data` (10 Gi by
+default, or the lab's `storage`) and `vscode-data` (5 Gi, the editor's settings). On the local
+cluster's local-path storage these are directories on the node, and the size isn't enforced.
+With the options in place, non-persistent VMs can skip `vm-data`, and a persistent VM's
+`vm-data` holds its writable disk (and snapshot files at option 3).
+
 ### What phase 1 needs in the API
 
 - **A role check.** The `instructor` role exists (`internal/models/models.go`, one of `admin`,
@@ -532,6 +575,13 @@ persistence, apart from 6, which also fits non-persistent labs.
   and down to the LabSession spec in the controller.
 - **Clear wording in the UI.** When an instructor picks a persistent option, show the costs from
   [the notice above](#persistent-and-non-persistent-sessions) before the VM is created.
+- **Resources before and after creation.** Before creating a VM, show the instructor what it
+  will reserve and store (the tables in [Resources each option uses](#resources-each-option-uses),
+  filled in with the lab's own CPU, memory, disk and storage). After that, show what each of
+  their VMs and labs is using: running or stopped, the CPU and memory it holds while running,
+  and the storage it keeps (writable disk, snapshots, save points). Nothing reports this today;
+  the storage figures would come from the volumes and snapshot files, and the CPU and memory
+  from the pod.
 
 ### Decided in phase 2
 
