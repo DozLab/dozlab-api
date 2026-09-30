@@ -766,10 +766,10 @@ image volumes that mount the init image read-only. That choice matters more for 
 
 # Decision: Firecracker and guest kernel versions
 
-- **Status:** proposed (2026-09-30), waiting on the owner. The kernel part is partly done:
-  dozlab-infra #8 (merged) moved the guest kernel to 5.10.245 on Firecracker v0.24.0.
-- **Recommendation:** Firecracker **v1.15.1** with guest kernel **6.1.155**, both from the same
-  Firecracker CI release set; later a custom 6.1 kernel for the k8s lab.
+- **Status:** accepted (2026-09-30)
+- **Decision:** option B, Firecracker **v1.15.1** with guest kernel **6.1.155**, both from the
+  same Firecracker CI release set (dozlab-infra #9). A custom 6.1 kernel for the k8s lab comes
+  later (D).
 
 ## In short
 
@@ -791,7 +791,9 @@ so the safest pairing is a Firecracker version and a kernel from the same publis
 | v0.24.0 | 4.14 (the old kernel) | boots; no `cpu` or `cpuset` cgroup controllers, so Kubernetes can't run and CPU limits can't be enforced |
 | v0.24.0 | 5.10.245 (CI v1.15) | **boots** (vm lab SSH in 4.5 s at 512 MiB); all cgroup controllers present. Now on `main` (dozlab-infra #8) |
 | v0.24.0 | 6.1.155 (CI v1.15) | **kernel panic**: `VFS: Cannot open root device "vda"` |
-| v1.17.0 | 5.10.245 and 6.1.155 | boot test run; results not yet reviewed |
+| v1.17.0 | 5.10.245 and 6.1.155 | boot test run; results not reviewed (not chosen) |
+| **v1.15.1** | **6.1.155 (CI v1.15)** | **boots.** vm lab 512 MiB: SSH in 4.9 s, 2 vCPUs, 482 MiB visible, all cgroup controllers, no failed units. k8s lab 2 GiB: SSH in 4.4 s; the kubelet waits for `kubeadm init` |
+| v1.15.1 | 6.1.155, snapshot | stop took 8.8 s (512 MiB memory + 14 KB state); restart resumed from the snapshot, SSH in **1.8 s**; a file and a running process (same PID) survived |
 
 **Why 6.1 panics on v0.24:** Firecracker v0.24 announces the VM's disks and network card with a
 `virtio_mmio.device=` boot option. Newer Firecracker versions describe devices through ACPI
@@ -845,7 +847,7 @@ dozlab-rootfs-manager or a new repo) is still open.
 
 ## What upgrading Firecracker changes (B or C)
 
-Found while preparing the upgrade on a branch (`agent/firecracker-1.17`, not pushed):
+Done in dozlab-infra #9:
 
 - **The release tarball layout:** the binary is now at
   `release-<version>-x86_64/firecracker-<version>-x86_64`. The Dockerfile pins the version and
@@ -861,6 +863,7 @@ Found while preparing the upgrade on a branch (`agent/firecracker-1.17`, not pus
 
 ## Still to decide
 
-- Which option: A, B or C (recommendation: B).
+- ~~Which option~~: B (owner, 2026-09-30).
 - Where the custom kernel for the k8s lab is built (D).
-- Whether to keep 5.10.245 as a fallback kernel in the image.
+- ~~Whether to keep 5.10.245 as a fallback~~: documented in the Dockerfile as build arguments,
+  not shipped in the image.
