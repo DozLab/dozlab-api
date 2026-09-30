@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"dozlab-backend/internal/database"
@@ -58,12 +59,7 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 		return
 	}
 
-	type ResourceConfig struct {
-		Memory  string `json:"memory,omitempty"`
-		CPU     string `json:"cpu,omitempty"`
-		Storage string `json:"storage,omitempty"`
-	}
-
+	// No resources here: the VM's size comes from the lab (labVMResources)
 	type SessionConfig struct {
 		VSCodePassword string `json:"vscode_password,omitempty"`
 		EnableTerminal bool   `json:"enable_terminal,omitempty"`
@@ -73,7 +69,6 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 
 	type CreateLabSessionRequest struct {
 		LabID          uuid.UUID `json:"lab_id" binding:"required"`
-		Resources      ResourceConfig `json:"resources,omitempty"`
 		Config         SessionConfig `json:"config,omitempty"`
 		Timeout        string `json:"timeout,omitempty"`
 	}
@@ -139,15 +134,6 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 	}
 
 	// Set default values
-	if req.Resources.Memory == "" {
-		req.Resources.Memory = "4Gi"
-	}
-	if req.Resources.CPU == "" {
-		req.Resources.CPU = "2"
-	}
-	if req.Resources.Storage == "" {
-		req.Resources.Storage = "10Gi"
-	}
 	if req.Config.VSCodePassword == "" {
 		req.Config.VSCodePassword = generatePassword()
 	}
@@ -171,11 +157,7 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 			"spec": map[string]interface{}{
 				"userId":    userID.(uuid.UUID).String(),
 				"sessionId": sessionID.String(),
-				"resources": map[string]interface{}{
-					"memory":  req.Resources.Memory,
-					"cpu":     req.Resources.CPU,
-					"storage": req.Resources.Storage,
-				},
+				"resources": labVMResources(lab),
 				"config": map[string]interface{}{
 					"vsCodePassword": req.Config.VSCodePassword,
 					"enableTerminal": true,
@@ -516,6 +498,27 @@ func setLabImages(labSession *unstructured.Unstructured, lab models.Lab) {
 	}
 	spec := labSession.Object["spec"].(map[string]interface{})
 	spec["customImages"] = map[string]interface{}{"initImage": *lab.InitImage}
+}
+
+// labVMResources is the VM size for a session of the lab: the lab's own size, which its creator
+// sets (models.Lab), not a size from the request. The controller reads spec.resources as the
+// VM's vCPUs, memory and disk. Zero values (a lab read without the columns) use the baseline.
+func labVMResources(lab models.Lab) map[string]interface{} {
+	cpus, mem, disk := lab.VMVCPUs, lab.VMMemoryMiB, lab.VMDiskGiB
+	if cpus == 0 {
+		cpus = 1
+	}
+	if mem == 0 {
+		mem = 512
+	}
+	if disk == 0 {
+		disk = 1
+	}
+	return map[string]interface{}{
+		"cpu":     strconv.Itoa(cpus),
+		"memory":  fmt.Sprintf("%dMi", mem),
+		"storage": fmt.Sprintf("%dGi", disk),
+	}
 }
 
 func isActiveSessionStatus(status string) bool {

@@ -79,6 +79,12 @@ type Lab struct {
 	// InitImage is the lab's rootfs init image (dozlab-rootfs-manager dozlab-init-<lab>); empty
 	// uses the controller's default. It becomes the LabSession's spec.customImages.initImage.
 	InitImage         *string    `json:"init_image,omitempty" db:"init_image" gorm:"type:varchar(255)"`
+	// VM size for every session of this lab, set by the lab's creator
+	// (migrations/003_lab_vm_size.up.sql). Zero on create means the database default. GORM
+	// ignores db tags and would name these vm_v_cpus etc., so they set column: explicitly.
+	VMVCPUs           int        `json:"vm_vcpus" db:"vm_vcpus" gorm:"column:vm_vcpus;default:1" binding:"omitempty,min=1,max=8"`
+	VMMemoryMiB       int        `json:"vm_memory_mib" db:"vm_memory_mib" gorm:"column:vm_memory_mib;default:512" binding:"omitempty,min=256,max=16384"`
+	VMDiskGiB         int        `json:"vm_disk_gib" db:"vm_disk_gib" gorm:"column:vm_disk_gib;default:1" binding:"omitempty,min=1,max=100"`
 	CreatedBy         *uuid.UUID `json:"created_by,omitempty" db:"created_by" gorm:"type:uuid;index"`
 	CreatedAt         time.Time  `json:"created_at" db:"created_at" gorm:"autoCreateTime"`
 	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at" gorm:"autoUpdateTime"`

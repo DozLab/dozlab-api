@@ -73,6 +73,12 @@ DozLab implements **Kubernetes sidecar architecture** with:
 - `PUT /api/v1/labs/{labId}` - Update lab (admin)
 - `DELETE /api/v1/labs/{labId}` - Delete lab (admin)
 
+VM size is set on the lab, and every session of the lab gets it; a session request can't set
+it. Lab fields (create and update): `vm_vcpus` (1–8, default 1), `vm_memory_mib` (256–16384,
+default 512) and `vm_disk_gib` (1–100, default 1). The API passes them to the LabSession as
+`spec.resources` (`cpu`, `memory` in Mi, `storage` in Gi), which the controller uses as the VM's
+vCPUs, memory and disk. See `docs/decision.md`, "Keeping resources to a minimum".
+
 ### Lab Specifications (Sidecar Support)
 - `GET /api/v1/labs/{labId}/specs` - Get all lab specs
 - `POST /api/v1/labs/{labId}/specs` - Create new spec version
