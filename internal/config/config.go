@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -38,6 +39,9 @@ type Config struct {
 	ServerPort string
 	JWTSecret  string
 
+	// CORSAllowedOrigins: browser origins that may call the API (CORS_ALLOWED_ORIGINS, comma-separated)
+	CORSAllowedOrigins []string
+
 	Database DatabaseConfig
 	Redis    RedisConfig
 	RabbitMQ RabbitMQConfig
@@ -62,8 +66,9 @@ type Config struct {
 // Load reads the configuration from environment variables
 func Load() (*Config, error) {
 	cfg := &Config{
-		ServerPort: getEnv("PORT", "8080"),
-		JWTSecret:  os.Getenv("JWT_SECRET"),
+		ServerPort:         getEnv("PORT", "8080"),
+		JWTSecret:          os.Getenv("JWT_SECRET"),
+		CORSAllowedOrigins: splitList(getEnv("CORS_ALLOWED_ORIGINS", "https://dozlab.github.io,http://localhost:3000")),
 		Database: DatabaseConfig{
 			URL:      os.Getenv("DATABASE_URL"),
 			Host:     os.Getenv("DB_HOST"),
@@ -149,4 +154,15 @@ func getEnvDuration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid %s: %w", key, err)
 	}
 	return d, nil
+}
+
+// splitList splits a comma-separated value, dropping blanks and surrounding spaces.
+func splitList(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

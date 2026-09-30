@@ -18,6 +18,7 @@ import (
 	"dozlab-backend/internal/config"
 	"dozlab-backend/internal/container"
 	"dozlab-backend/internal/database"
+	"dozlab-backend/internal/middleware"
 
 	"github.com/gin-gonic/gin"
 	"k8s.io/client-go/dynamic"
@@ -65,7 +66,7 @@ func run() error {
 	}
 
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
+	router.Use(gin.Logger(), gin.Recovery(), middleware.CORS(cfg.CORSAllowedOrigins))
 	api.SetupRoutes(router, db, c.EventBus, c.WSManager)
 
 	srv := &http.Server{
