@@ -581,7 +581,7 @@ and a 4G disk. "Used" is inside the VM, 20 s after SSH came up, with no student 
 | vm | 512 MiB | 5.0 s | 47 MiB | OK, no failed units |
 | vm | 256 MiB | 5.0 s | 46 MiB | boots, but cloud-init's locale step fails every time (`cloud-config.service`); generating the locale needs more memory |
 | vm | 128 MiB | 5.5 s | — | SSH answers once, then the VM stops responding at ~48% CPU: too small |
-| k8s | 2048 / 1024 / 512 MiB | 5.0–5.7 s | 70–73 MiB | boots; containerd runs. Not representative: nothing Kubernetes runs yet, and `br_netfilter` is missing from the guest kernel (4.14), so `systemd-modules-load` fails at every size |
+| k8s | 2048 / 1024 / 512 MiB | 5.0–5.7 s | 70–73 MiB | boots; containerd runs. Not representative: Kubernetes isn't running (see [Why the k8s lab doesn't run Kubernetes](#why-the-k8s-lab-doesnt-run-kubernetes)) |
 
 Other parts, idle:
 - `terminal-sidecar`: 10.7 MiB, 0% CPU (reserves 256 Mi today)
@@ -642,12 +642,35 @@ each lab type before setting its size.
 |---|---|---|
 | vm (Linux, shell tools) | 1 vCPU, 512 MiB, 1 Gi writable | measured idle; confirm under load |
 | custom-initrd (tiny Alpine, 41 MB rootfs) | 1 vCPU, probably 128–256 MiB | not measured |
-| k8s | 2 vCPU, 2 GiB, 4 Gi writable: kubeadm's documented minimum for a control-plane node | idle measured only; can't run Kubernetes until the guest kernel has `br_netfilter` |
+| k8s | 2 vCPU, 2 GiB, 4 Gi writable: kubeadm's documented minimum for a control-plane node | idle measured only; Kubernetes doesn't run yet (below) |
 | any lab + editor | add code-server | measure code-server |
 
 At what scale this matters: **from the first VM.** Today one VM reserves 4.25 Gi, so this node
 holds 3. The platform's own fixed costs (controller replicas, RabbitMQ) matter most on a small
 cluster like this one; per-VM sizes matter more as the number of VMs grows.
+
+#### Why the k8s lab doesn't run Kubernetes
+
+Diagnosed 2026-09-30 by booting the k8s lab (2 vCPU, 2048 MiB; Kubernetes v1.30.14; guest kernel
+4.14.174). Three causes, in the order they'd be hit:
+
+1. **Nothing sets up the node.** No one runs `kubeadm init`, so the kubelet's config
+   (`/var/lib/kubelet/config.yaml`) never exists and the kubelet restarts forever.
+2. **An outdated kubelet flag.** The kubelet's systemd drop-in passes `--container-runtime=remote`,
+   which was removed in Kubernetes 1.27. Kubelet 1.30 will refuse to start even with a config.
+3. **The guest kernel is too old for cgroup v2.** The VM uses cgroup v2, but kernel 4.14 offers
+   only the `io`, `memory` and `pids` controllers there, with no `cpu` or `cpuset`. Kubernetes
+   documents kernel 5.8 or later for cgroup v2, so the kubelet is expected to fail its cgroup
+   checks, and CPU limits can't be enforced. Either a newer guest kernel (5.10+, already an owner
+   item) or booting with cgroup v1 (deprecated in Kubernetes).
+
+**Not a cause:** `systemd-modules-load` fails on `br_netfilter`, but only because the image has no
+module files for 4.14 (it has `/lib/modules/5.15.0-194-generic` from an unused Ubuntu kernel).
+`br_netfilter` and `overlay` are built into the kernel and work (`bridge-nf-call-iptables=1`).
+Earlier notes said `br_netfilter` was missing; that was wrong.
+
+The k8s lab's size can only be measured once these are fixed. Until then, the starting size is
+kubeadm's documented minimum for a control-plane node: 2 CPU and 2 GiB.
 
 #### Which options use more and which use less
 
