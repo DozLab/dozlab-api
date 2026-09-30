@@ -842,8 +842,15 @@ needs a custom kernel build whichever option is chosen (see
 ### D. Our own kernel build (needed for the k8s lab in any option)
 
 Build 6.1 from Firecracker's CI config for v1.15, plus the iptables and nf_tables options
-kube-proxy needs. Its size and build time aren't measured yet. Where it's built (dozlab-infra,
-dozlab-rootfs-manager or a new repo) is still open.
+kube-proxy needs. **Done in dozlab-infra #10** (owner chose dozlab-infra, 2026-09-30): a
+Dockerfile stage builds 6.1.155 from kernel.org with `kernel/firecracker-6.1.155.config` plus
+`kernel/dozlab.config`, and fails if an option is dropped. A cold build takes about 10 min
+(7.7 min compiling on 8 cores); Docker caches it afterwards.
+
+Tested with the k8s lab (dozlab-rootfs-manager #10, first-boot `kubeadm init`) at 2 vCPUs and
+2 GiB: `kubeadm init` done 64 s after VM start, node Ready, all 7 kube-system pods Running
+(kube-proxy in iptables mode on nf_tables), Services and DNS work from pods, 493–509 MiB used.
+In-pod DNS is ready about 95 s after boot.
 
 ## What upgrading Firecracker changes (B or C)
 
@@ -864,6 +871,6 @@ Done in dozlab-infra #9:
 ## Still to decide
 
 - ~~Which option~~: B (owner, 2026-09-30).
-- Where the custom kernel for the k8s lab is built (D).
+- ~~Where the custom kernel for the k8s lab is built (D)~~: dozlab-infra (#10).
 - ~~Whether to keep 5.10.245 as a fallback~~: documented in the Dockerfile as build arguments,
   not shipped in the image.
