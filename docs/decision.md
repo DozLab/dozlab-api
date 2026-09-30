@@ -761,3 +761,106 @@ image volumes that mount the init image read-only. That choice matters more for 
 - dozlab-controller: passes the writable disk size to the init container in place of today's
   `IMAGE_SIZE`; the `vm-kernels` emptyDir size limit follows the new layout.
 - Option C can be added later for sessions that persist, formatted and seeded by the same code.
+
+---
+
+# Decision: Firecracker and guest kernel versions
+
+- **Status:** proposed (2026-09-30), waiting on the owner. The kernel part is partly done:
+  dozlab-infra #8 (merged) moved the guest kernel to 5.10.245 on Firecracker v0.24.0.
+- **Recommendation:** Firecracker **v1.15.1** with guest kernel **6.1.155**, both from the same
+  Firecracker CI release set; later a custom 6.1 kernel for the k8s lab.
+
+## In short
+
+The VM runs on two pieces that have to be chosen together:
+
+- **Firecracker**, the program that runs the VM (in the `dozlab-firecracker` image). Today:
+  v0.24.0, from 2021.
+- **The guest kernel**, the Linux kernel inside the VM (`/find/vmlinux.bin` in the same image).
+  Today: 5.10.245.
+
+They depend on each other: a kernel only boots if it understands how that Firecracker version
+describes the VM's devices. Firecracker publishes the kernels it tests each release line with,
+so the safest pairing is a Firecracker version and a kernel from the same published set.
+
+## What we found (2026-09-30)
+
+| Firecracker | Kernel | Result |
+|---|---|---|
+| v0.24.0 | 4.14 (the old kernel) | boots; no `cpu` or `cpuset` cgroup controllers, so Kubernetes can't run and CPU limits can't be enforced |
+| v0.24.0 | 5.10.245 (CI v1.15) | **boots** (vm lab SSH in 4.5 s at 512 MiB); all cgroup controllers present. Now on `main` (dozlab-infra #8) |
+| v0.24.0 | 6.1.155 (CI v1.15) | **kernel panic**: `VFS: Cannot open root device "vda"` |
+| v1.17.0 | 5.10.245 and 6.1.155 | boot test run; results not yet reviewed |
+
+**Why 6.1 panics on v0.24:** Firecracker v0.24 announces the VM's disks and network card with a
+`virtio_mmio.device=` boot option. Newer Firecracker versions describe devices through ACPI
+tables instead. The 5.10 CI build still reads the boot option
+(`CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y`); the 6.1 CI build doesn't, and v0.24 has no ACPI, so 6.1
+finds no disk. **So 6.1 needs a newer Firecracker.**
+
+**What Firecracker's CI publishes:** guest kernels per release line in its public bucket under
+`firecracker-ci/vX.Y/`. The newest sets are `v1.14/` and `v1.15/`; v1.15 has 5.10.245 and
+6.1.155. Firecracker v1.16.x and v1.17.0 (released 2026-09-10) have no published kernel set, so
+**v1.15.1 (2026-04-07) is the newest Firecracker published together with its tested kernels.**
+
+**What the kernel still lacks for the k8s lab:** all of Firecracker's CI kernels (5.10 and 6.1)
+are built without `xt_comment`, `xt_statistic`, `xt_mark`, `xt_multiport` and nf_tables, and
+without module support. kube-proxy needs these for Kubernetes Services, so a working k8s lab
+needs a custom kernel build whichever option is chosen (see
+[Why the k8s lab doesn't run Kubernetes](#why-the-k8s-lab-doesnt-run-kubernetes)).
+
+## Options
+
+### A. Stay on Firecracker v0.24.0 with kernel 5.10 (today)
+
+| Pros | Cons |
+|---|---|
+| Works now for the vm lab; nothing more to change | Kernel 5.10 reaches end of life in December 2026 |
+| | v0.24 can't boot 6.1, so the kernel can't move forward |
+| | Snapshots were a developer preview in v0.24; persistent sessions would be built on it and then broken by the upgrade (snapshots don't restore across versions) |
+| | Five years of Firecracker fixes missing |
+
+### B. Firecracker v1.15.1 with kernel 6.1.155 (recommended)
+
+| Pros | Cons |
+|---|---|
+| Firecracker and kernel come from the same published CI set | Not the newest Firecracker (v1.17.0 is) |
+| Kernel 6.1 is supported for longer than 5.10 | Needs the API changes below |
+| Stable snapshots, needed before persistent sessions ship | Still needs a custom kernel for the k8s lab |
+| Kernel 5.10.245 from the same set stays available as a fallback | |
+
+### C. Firecracker v1.17.0 with kernel 6.1.155
+
+| Pros | Cons |
+|---|---|
+| Newest Firecracker | No kernel set is published for v1.17, so this pairing isn't one Firecracker published |
+| Same API changes as B | If something breaks, it's unclear whether Firecracker or the kernel is at fault |
+
+### D. Our own kernel build (needed for the k8s lab in any option)
+
+Build 6.1 from Firecracker's CI config for v1.15, plus the iptables and nf_tables options
+kube-proxy needs. Its size and build time aren't measured yet. Where it's built (dozlab-infra,
+dozlab-rootfs-manager or a new repo) is still open.
+
+## What upgrading Firecracker changes (B or C)
+
+Found while preparing the upgrade on a branch (`agent/firecracker-1.17`, not pushed):
+
+- **The release tarball layout:** the binary is now at
+  `release-<version>-x86_64/firecracker-<version>-x86_64`. The Dockerfile pins the version and
+  the release's published SHA-256.
+- **`machine-config`:** `ht_enabled` was renamed `smt` in Firecracker 1.0.
+  `start-firecracker.sh` ignores API errors, so on 1.x the old field would be rejected silently
+  and the VM would start with Firecracker's defaults (1 vCPU, 128 MiB). The boot tests check the
+  VM's vCPUs and memory from inside to catch this.
+- **Snapshot loading:** `mem_file_path` is replaced by `mem_backend` (`backend_type: File`,
+  `backend_path`).
+- **Snapshots:** taken on one Firecracker version can't be restored on another. Upgrade before
+  persistent sessions ship, not after.
+
+## Still to decide
+
+- Which option: A, B or C (recommendation: B).
+- Where the custom kernel for the k8s lab is built (D).
+- Whether to keep 5.10.245 as a fallback kernel in the image.
