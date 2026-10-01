@@ -73,6 +73,41 @@ DozLab implements **Kubernetes sidecar architecture** with:
 - `PUT /api/v1/labs/{labId}` - Update lab (its creator, if an instructor or admin; or any admin)
 - `DELETE /api/v1/labs/{labId}` - Delete lab (its creator, if an instructor or admin; or any admin)
 
+- `GET /api/v1/labs/{labId}/estimate` - What one VM of the lab reserves and stores (instructor, admin)
+
+The estimate is for showing an instructor what a VM takes before it is created. CPU is in
+thousandths of a core and memory and storage in MiB:
+
+```json
+{
+  "lab_id": "...",
+  "estimate": {
+    "persistence": "none",
+    "vm": {"vcpus": 1, "memory_mib": 512, "disk_gib": 1},
+    "containers": [
+      {"name": "firecracker-vm", "purpose": "runs the VM",
+       "reserved": {"cpu_millicores": 100, "memory_mib": 640},
+       "maximum": {"cpu_millicores": 1000, "memory_mib": 640}},
+      {"name": "terminal-sidecar", "...": "..."},
+      {"name": "code-server", "...": "..."}
+    ],
+    "total": {"reserved": {"cpu_millicores": 850, "memory_mib": 1920},
+              "maximum": {"cpu_millicores": 2500, "memory_mib": 3200}},
+    "devices": {"dozlab.io/kvm": 1, "dozlab.io/tun": 1},
+    "storage": {
+      "while_running": [{"name": "vm-kernels", "purpose": "the VM's disk", "kind": "node-local", "size_mib": 2048}, "..."],
+      "volumes_mib": 6144,
+      "node_local_limit_mib": 2058,
+      "after_stop_mib": 0
+    }
+  }
+}
+```
+
+`reserved` is what the cluster sets aside (it limits how many VMs fit on a node); `maximum` is
+the most the VM may use. `persistence` (query parameter) accepts only `none` today. The numbers
+mirror dozlab-controller (`internal/estimate`).
+
 VM size is set on the lab, and every session of the lab gets it; a session request can't set
 it. Lab fields (create and update): `vm_vcpus` (1–8, default 1), `vm_memory_mib` (256–16384,
 default 512) and `vm_disk_gib` (1–100, default 1). The API passes them to the LabSession as
@@ -96,8 +131,32 @@ vCPUs, memory and disk. See `docs/decision.md`, "Keeping resources to a minimum"
 ### Lab Sessions (VMs)
 - `POST /api/v1/lab-sessions` - Start a session of a lab (`lab_id`)
 - `GET /api/v1/lab-sessions` - List the caller's sessions
-- `GET /api/v1/lab-sessions/{id}` - Session details and cluster status
+- `GET /api/v1/lab-sessions/{id}` - Session details and cluster status, including `k8s_status.usage`
+- `GET /api/v1/lab-sessions/usage` - What the caller's VMs hold in the cluster, per VM and per lab (instructor, admin)
 - `DELETE /api/v1/lab-sessions/{id}` - End a session
+
+Usage is what a VM holds in the cluster, as dozlab-controller reports it in the LabSession's
+`status.usage`: CPU in thousandths of a core, memory and storage in MiB. They are the amounts
+set aside for the VM, not what it consumes. A VM holds its CPU and memory while `running` is
+true, and its storage until the session is deleted. `usage` is absent (`null` in the report)
+until the controller has reported it.
+
+```json
+{
+  "labs": [
+    {"lab_id": "...", "lab_name": "Docker basics",
+     "vms": [
+       {"session_id": "...", "user_id": "...", "status": "running", "phase": "Running", "created_at": "...",
+        "usage": {"running": true, "cpu_millicores": 850, "memory_mib": 1920, "storage_mib": 6144}}
+     ],
+     "total": {"vms": 2, "running_vms": 1, "cpu_millicores": 850, "memory_mib": 1920, "storage_mib": 12288}}
+  ],
+  "total": {"vms": 3, "running_vms": 1, "cpu_millicores": 850, "memory_mib": 1920, "storage_mib": 12288}
+}
+```
+
+The report covers the caller's own VMs, grouped by lab; an admin gets everyone's. Totals count
+CPU and memory for running VMs only, and storage for all of them.
 
 Session options are for instructors and admins. A student who sends `timeout` or any of
 `config.enable_terminal`, `config.enable_vscode`, `config.enable_ssh` gets 403, with the option
