@@ -1,19 +1,16 @@
 package handlers
 
-import "github.com/gin-gonic/gin"
+import (
+	"dozlab-backend/internal/authz"
 
-// Roles a user can have (models.User.Role). AuthMiddleware puts the token's role in the
-// request context as "role".
-const (
-	RoleAdmin      = "admin"
-	RoleInstructor = "instructor"
-	RoleStudent    = "student"
+	"github.com/gin-gonic/gin"
 )
 
-// canManageLabs reports whether the caller may create labs and set session options: only
-// instructors and admins (docs/decision.md, "What phase 1 needs in the API"). A missing or
-// unknown role gets a student's rights.
-func canManageLabs(c *gin.Context) bool {
+// can reports whether the caller's role has the permission (internal/authz). The role is put
+// in the request context by AuthMiddleware and refreshed from the database by CurrentUser; a
+// missing or unknown role has no permissions.
+func can(c *gin.Context, p authz.Permission) bool {
 	role, _ := c.Get("role")
-	return role == RoleAdmin || role == RoleInstructor
+	roleName, _ := role.(string)
+	return authz.Can(authz.Role(roleName), p)
 }

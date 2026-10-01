@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 
+	"dozlab-backend/internal/audit"
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
 
@@ -222,6 +223,24 @@ func (h *UserHandler) UpdateUserRole(c *gin.Context) {
 		return
 	}
 
+	var target models.User
+	if err := h.db.DB.Select("id", "role").First(&target, "id = ?", userID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "User not found",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Database error",
+		})
+		return
+	}
+	details := audit.Annotate(c)
+	details.ResourceType, details.ResourceID = "users", userID.String()
+	details.Old = map[string]interface{}{"role": target.Role}
+	details.New = map[string]interface{}{"role": req.Role}
+
 	if err := h.db.DB.Model(&models.User{}).Where("id = ?", userID).Update("role", req.Role).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to update user role",
@@ -256,6 +275,24 @@ func (h *UserHandler) UpdateUserStatus(c *gin.Context) {
 		})
 		return
 	}
+
+	var target models.User
+	if err := h.db.DB.Select("id", "is_active").First(&target, "id = ?", userID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "User not found",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Database error",
+		})
+		return
+	}
+	details := audit.Annotate(c)
+	details.ResourceType, details.ResourceID = "users", userID.String()
+	details.Old = map[string]interface{}{"is_active": target.IsActive}
+	details.New = map[string]interface{}{"is_active": req.IsActive}
 
 	if err := h.db.DB.Model(&models.User{}).Where("id = ?", userID).Update("is_active", req.IsActive).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{

@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"os"
 
-	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/api/handlers"
+	"dozlab-backend/internal/audit"
+	"dozlab-backend/internal/authz"
+	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/middleware"
 	"dozlab-backend/internal/services"
 	"dozlab-backend/internal/websocket"
@@ -49,6 +51,7 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 	labHandler := handlers.NewLabHandler(db)
 	authHandler := handlers.NewAuthHandler(db)
 	notificationHandler := handlers.NewNotificationHandler(eventBus)
+	auditHandler := handlers.NewAuditHandler(db)
 	hostCheckHandler := handlers.NewHostCheckHandler()
 	
 	// Initialize CRD-based lab session handler
@@ -75,8 +78,18 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 		})
 	})
 
+	// Access control: each route names the permission it needs (internal/authz has the table of
+	// which role has which). A request without it gets 403.
+	require := middleware.RequirePermission
+	// Reads of other people's data are recorded in the audit log even when they succeed
+	sensitiveRead := func(c *gin.Context) { audit.Annotate(c).Always = true }
+
 	// API v1 routes
 	v1 := router.Group("/api/v1")
+	// Audit log: every change, every refused or failed request, and the sensitive reads. It is
+	// first so that requests refused for a bad token are recorded too. AUDIT_READS=true also
+	// records every successful read.
+	v1.Use(audit.Middleware(audit.NewDBRecorder(db), audit.Options{Reads: os.Getenv("AUDIT_READS") == "true"}))
 	{
 		// Authentication routes (no auth required)
 		auth := v1.Group("/auth")
@@ -89,66 +102,71 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 		// WebSocket (notifications). Browsers can't set Authorization on a WebSocket, so they
 		// send the JWT as a subprotocol: new WebSocket(url, ["dozlab.bearer", token]).
 		// See docs/decision.md.
-		v1.GET("/ws", middleware.WebSocketAuthMiddleware(os.Getenv("JWT_SECRET")), wsManager.HandleWebSocket)
+		v1.GET("/ws", middleware.WebSocketAuthMiddleware(os.Getenv("JWT_SECRET")), middleware.CurrentUser(db), wsManager.HandleWebSocket)
 
 		// Protected routes (require authentication)
 		protected := v1.Group("/")
 		protected.Use(middleware.AuthMiddleware(os.Getenv("JWT_SECRET")))
+		// The user's role and status as they are now, not as they were when the token was issued
+		protected.Use(middleware.CurrentUser(db))
 		{
 			// User routes
 			users := protected.Group("/users")
 			{
-				users.GET("/profile", userHandler.GetProfile)
-				users.PUT("/profile", userHandler.UpdateProfile)
+				users.GET("/profile", require(authz.ProfileRead), userHandler.GetProfile)
+				users.PUT("/profile", require(authz.ProfileUpdate), userHandler.UpdateProfile)
 				users.POST("/logout", authHandler.Logout)
 			}
 
 			// Lab routes
 			labs := protected.Group("/labs")
 			{
-				labs.GET("/", labHandler.GetLabs)
-				labs.POST("/", labHandler.CreateLab)
-				labs.GET("/:labId", labHandler.GetLab)
-				labs.PUT("/:labId", labHandler.UpdateLab)
-				labs.DELETE("/:labId", labHandler.DeleteLab)
+				labs.GET("/", require(authz.LabsRead), labHandler.GetLabs)
+				labs.POST("/", require(authz.LabsCreate), labHandler.CreateLab)
+				labs.GET("/:labId", require(authz.LabsRead), labHandler.GetLab)
+				// Own labs; labs:manage_any (admins) lifts that in the handler
+				labs.PUT("/:labId", require(authz.LabsUpdate), labHandler.UpdateLab)
+				labs.DELETE("/:labId", require(authz.LabsDelete), labHandler.DeleteLab)
 				
 				// Lab specifications routes with composite key support
-				labs.GET("/:labId/specs", labHandler.GetLabSpecs)
-				labs.POST("/:labId/specs", labHandler.CreateLabSpec)
-				labs.GET("/:labId/specs/:version", labHandler.GetLabSpec)
-				labs.PUT("/:labId/specs/:version", labHandler.UpdateLabSpec)
-				labs.DELETE("/:labId/specs/:version", labHandler.DeleteLabSpec)
+				labs.GET("/:labId/specs", require(authz.LabSpecsRead), labHandler.GetLabSpecs)
+				labs.POST("/:labId/specs", require(authz.LabSpecsWrite), labHandler.CreateLabSpec)
+				labs.GET("/:labId/specs/:version", require(authz.LabSpecsRead), labHandler.GetLabSpec)
+				labs.PUT("/:labId/specs/:version", require(authz.LabSpecsWrite), labHandler.UpdateLabSpec)
+				labs.DELETE("/:labId/specs/:version", require(authz.LabSpecsWrite), labHandler.DeleteLabSpec)
 			}
 
 			// Session routes (legacy - for backwards compatibility)
 			sessions := protected.Group("/sessions")
 			{
-				sessions.GET("/", labHandler.GetSessions)
-				sessions.POST("/", labHandler.CreateSession)
-				sessions.GET("/:id", labHandler.GetSession)
-				sessions.PUT("/:id/status", labHandler.UpdateSessionStatus)
-				sessions.DELETE("/:id", labHandler.DeleteSession)
+				sessions.GET("/", require(authz.SessionsRead), labHandler.GetSessions)
+				sessions.POST("/", require(authz.SessionsCreate), labHandler.CreateSession)
+				sessions.GET("/:id", require(authz.SessionsRead), labHandler.GetSession)
+				// The handler sets the status of any session, so only admins may call it
+				sessions.PUT("/:id/status", require(authz.SessionsManageAny), labHandler.UpdateSessionStatus)
+				sessions.DELETE("/:id", require(authz.SessionsDelete), labHandler.DeleteSession)
 			}
 
 			// CRD-based lab session routes (new)
 			if labSessionHandler != nil {
 				labSessions := protected.Group("/lab-sessions")
 				{
-					labSessions.POST("/", labSessionHandler.CreateLabSession)
-					labSessions.GET("/", labSessionHandler.ListLabSessions)
-					labSessions.GET("/:id", labSessionHandler.GetLabSession)
-					labSessions.DELETE("/:id", labSessionHandler.DeleteLabSession)
+					// sessions:set_options is checked in the handler, when a request sets one
+					labSessions.POST("/", require(authz.SessionsCreate), labSessionHandler.CreateLabSession)
+					labSessions.GET("/", require(authz.SessionsRead), labSessionHandler.ListLabSessions)
+					labSessions.GET("/:id", require(authz.SessionsRead), labSessionHandler.GetLabSession)
+					labSessions.DELETE("/:id", require(authz.SessionsDelete), labSessionHandler.DeleteLabSession)
 				}
 			}
 
 			// Host capacity check against lab session resource requests
-			protected.POST("/host-check", hostCheckHandler.CheckHost)
+			protected.POST("/host-check", require(authz.HostCheckRun), hostCheckHandler.CheckHost)
 
 			// Progress routes
 			progress := protected.Group("/progress")
 			{
-				progress.GET("/", userHandler.GetUserProgress)
-				progress.GET("/labs/:labId", userHandler.GetLabProgress)
+				progress.GET("/", require(authz.ProgressRead), userHandler.GetUserProgress)
+				progress.GET("/labs/:labId", require(authz.ProgressRead), userHandler.GetLabProgress)
 			}
 
 			// Proxy endpoints for other microservices (optional - for convenience)
@@ -156,7 +174,7 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 			proxy := protected.Group("/proxy")
 			{
 				// WebSocket service proxy
-				proxy.GET("/websocket/stats", func(c *gin.Context) {
+				proxy.GET("/websocket/stats", require(authz.ServiceStatsRead), func(c *gin.Context) {
 					stats, err := serviceClients.GetWebSocketStats(c.Request.Context())
 					if err != nil {
 						c.JSON(http.StatusServiceUnavailable, gin.H{"error": "WebSocket service unavailable"})
@@ -166,18 +184,20 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 				})
 				
 				// Notifications go out on the event bus (RabbitMQ, routing key "notification")
-				proxy.POST("/notifications", notificationHandler.SendNotification)
+				proxy.POST("/notifications", require(authz.NotificationsSend), notificationHandler.SendNotification)
 			}
 		}
 
-		// Admin routes (require admin role)
+		// Admin routes: each permission here is held by admins only
 		admin := v1.Group("/admin")
 		admin.Use(middleware.AuthMiddleware(os.Getenv("JWT_SECRET")))
-		admin.Use(middleware.RoleMiddleware("admin"))
+		admin.Use(middleware.CurrentUser(db))
 		{
-			admin.GET("/users", userHandler.GetAllUsers)
-			admin.PUT("/users/:id/role", userHandler.UpdateUserRole)
-			admin.PUT("/users/:id/status", userHandler.UpdateUserStatus)
+			admin.GET("/users", sensitiveRead, require(authz.UsersList), userHandler.GetAllUsers)
+			admin.PUT("/users/:id/role", require(authz.UsersUpdateRole), userHandler.UpdateUserRole)
+			admin.PUT("/users/:id/status", require(authz.UsersUpdateStatus), userHandler.UpdateUserStatus)
+			// Reading the audit log is itself recorded
+			admin.GET("/audit-logs", sensitiveRead, require(authz.AuditRead), auditHandler.ListAuditLogs)
 		}
 	}
 }

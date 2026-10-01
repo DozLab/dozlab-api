@@ -70,8 +70,8 @@ DozLab implements **Kubernetes sidecar architecture** with:
 - `GET /api/v1/labs` - List available labs
 - `POST /api/v1/labs` - Create new lab (instructor or admin; a student gets 403)
 - `GET /api/v1/labs/{labId}` - Get lab details
-- `PUT /api/v1/labs/{labId}` - Update lab (admin)
-- `DELETE /api/v1/labs/{labId}` - Delete lab (admin)
+- `PUT /api/v1/labs/{labId}` - Update lab (its creator, if an instructor or admin; or any admin)
+- `DELETE /api/v1/labs/{labId}` - Delete lab (its creator, if an instructor or admin; or any admin)
 
 VM size is set on the lab, and every session of the lab gets it; a session request can't set
 it. Lab fields (create and update): `vm_vcpus` (1–8, default 1), `vm_memory_mib` (256–16384,
@@ -90,7 +90,7 @@ vCPUs, memory and disk. See `docs/decision.md`, "Keeping resources to a minimum"
 - `GET /api/v1/sessions` - List user sessions
 - `POST /api/v1/sessions` - Create new session
 - `GET /api/v1/sessions/{id}` - Get session details
-- `PUT /api/v1/sessions/{id}/status` - Update session status
+- `PUT /api/v1/sessions/{id}/status` - Update session status (admin)
 - `DELETE /api/v1/sessions/{id}` - End session
 
 ### Lab Sessions (VMs)
@@ -168,6 +168,28 @@ memory/storage in GiB; `kvm` is omitted when not required). Invalid quantities o
 - `GET /api/v1/admin/users` - List all users
 - `PUT /api/v1/admin/users/{id}/role` - Update user role
 - `PUT /api/v1/admin/users/{id}/status` - Update user status
+- `GET /api/v1/admin/audit-logs` - Read the audit log, newest first
+
+Audit log filters (query parameters): `user_id`, `action` (for example `users:update_role`,
+`labs:create`, `auth:login`), `resource_type`, `resource_id`, `outcome` (`success`, `denied`,
+`failure`), `ip_address`, `from` and `to` (RFC 3339), `page`, `limit` (up to 200, default 50).
+The response is `{"audit_logs": [...], "pagination": {"page", "limit", "total"}}`. Entries can't
+be changed or deleted, by the API or in the database.
+
+### Access Control
+Every route needs a permission, and each role has a fixed set (`internal/authz/authz.go`). A
+caller without the permission gets 403 with `{"error": "Insufficient privileges", "permission":
+"<name>"}`. The user's role and status are read from the database on every request, so a token
+issued before a role change or deactivation doesn't keep the old rights; a deactivated or
+deleted user gets 401.
+
+| Role | May |
+|---|---|
+| `student` | read published labs and specs; create, read and end their own sessions; their own profile and progress |
+| `instructor` | the above; create labs; update and delete their own labs; write lab specs; set session options |
+| `admin` | the above; unpublished labs; anyone's labs and sessions; `PUT /sessions/{id}/status`; the admin endpoints |
+
+See `docs/decision.md`, "Enterprise readiness".
 
 ## Redis Event Channels
 

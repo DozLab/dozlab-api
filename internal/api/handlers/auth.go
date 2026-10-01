@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 
+	"dozlab-backend/internal/audit"
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
 	"dozlab-backend/pkg/auth"
@@ -35,6 +36,8 @@ func NewAuthHandler(db *database.Database) *AuthHandler {
 // @Failure 500 {object} map[string]interface{} "Internal server error"
 // @Router /auth/register [post]
 func (h *AuthHandler) Register(c *gin.Context) {
+	audit.Annotate(c).Action = "auth:register"
+
 	var req models.UserRegistrationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -87,6 +90,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		})
 		return
 	}
+	audit.Annotate(c).UserID = &user.ID
+	audit.SetResource(c, "users", user.ID.String())
+	audit.SetMeta(c, "username", user.Username)
 
 	// Generate tokens
 	tokens, err := auth.GenerateTokenPair(user.ID, user.Username, user.Email, user.Role, os.Getenv("JWT_SECRET"))
@@ -130,6 +136,8 @@ func (h *AuthHandler) Register(c *gin.Context) {
 // @Failure 500 {object} map[string]interface{} "Internal server error"
 // @Router /auth/login [post]
 func (h *AuthHandler) Login(c *gin.Context) {
+	audit.Annotate(c).Action = "auth:login"
+
 	var req models.UserLoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -138,6 +146,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		})
 		return
 	}
+	// The name that was tried, so failed logins can be traced. Never the password.
+	audit.SetMeta(c, "username", req.Username)
 
 	// Find user by username
 	var user models.User
@@ -153,6 +163,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		})
 		return
 	}
+
+	audit.Annotate(c).UserID = &user.ID
+	audit.SetResource(c, "users", user.ID.String())
 
 	// Check if user is active
 	if !user.IsActive {
@@ -215,6 +228,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 // @Failure 401 {object} map[string]interface{} "Invalid refresh token"
 // @Router /auth/refresh [post]
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
+	audit.Annotate(c).Action = "auth:refresh"
+
 	type RefreshRequest struct {
 		RefreshToken string `json:"refresh_token" binding:"required"`
 	}

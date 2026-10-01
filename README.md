@@ -273,7 +273,23 @@ VSCODE_IMAGE=codercom/code-server:latest
 
 # Network Configuration
 ALLOWED_ORIGINS=http://localhost:3000,https://yourdomain.com
+
+# Audit log: also record every successful read (default: changes, refused and failed
+# requests, and sensitive reads only)
+AUDIT_READS=false
 ```
+
+### Access control and audit log
+
+- **Access control:** `internal/authz/authz.go` is the one table of which role has which
+  permission, and `internal/api/routes.go` names the permission each route needs.
+- **Audit log:** `internal/audit` records who did what, to which record, from where and when in
+  the `audit_logs` table. Migration `004_audit_log.up.sql` must be applied: it adds the columns
+  and makes the table append-only. Admins read the log at `GET /api/v1/admin/audit-logs`.
+- The append-only rule is a PostgreSQL trigger, so its test needs a real database:
+  `AUDIT_TEST_DATABASE_URL=postgres://... go test ./internal/audit/` (migrations applied).
+
+See `docs/decision.md`, "Enterprise readiness", for what is and isn't covered.
 
 ## 🧪 Testing
 

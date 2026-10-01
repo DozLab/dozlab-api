@@ -1118,3 +1118,117 @@ code-server runs with `--auth none`.
 In order: code-server with `--auth none` behind Traefik `forwardAuth` to a new API endpoint that
 checks the JWT and session ownership (then iframes work too); the same for the terminal route;
 `CheckOrigin` on `/api/v1/ws` limited to the CORS origins; rate limits on `/api/v1/auth/*`.
+
+---
+
+# Decision: enterprise readiness: access control, audit log, customer isolation
+
+- **Status:** access control and the audit log are built (2026-10-01). Customer isolation is
+  **not decided**: it needs the owner to choose what a "customer" is in DozLab.
+- **Why now:** three questions end an enterprise deal before it starts if the answer is no, and
+  the third is hard to add later.
+
+## In short
+
+| # | The question | Before 2026-10-01 | Now | Still open |
+|---|---|---|---|---|
+| 1 | **Access control:** permissions by role, by action, by data type, scoped by team | three roles, with `if role != "admin"` spread over the handlers; students could edit lab specs and set any session's status | one table of which role has which permission (`internal/authz`), named on every route; a role or status change applies to the next request | scoping by team or organisation: there is no team in the schema |
+| 2 | **Audit log:** who did what, from where, when; immutable, queryable, separate from app data | an `audit_logs` table nothing wrote to | every change, every refused or failed request and the sensitive reads are recorded; the database refuses updates and deletes; admins can query it | it is in the same database as the app data; retention and export aren't set |
+| 3 | **Customer isolation:** one customer's data kept apart from another's, in the architecture | none in the data: no tenant in the schema, one Kubernetes namespace for every session. Compute is isolated: each lab is its own Firecracker microVM | unchanged | everything; see [Customer isolation](#customer-isolation-not-decided) |
+
+## Access control (built)
+
+- **One table.** `internal/authz/authz.go` lists the permissions (`<data type>:<action>`, for
+  example `labs:create`, `sessions:set_options`, `users:update_role`, `audit:read`) and which
+  role has which. Nothing else compares role names.
+- **On every route.** `internal/api/routes.go` names the permission each route needs
+  (`middleware.RequirePermission`). A caller without it gets 403, and the refusal is in the
+  audit log with the permission's name.
+- **Own records and any record.** `labs:update`, `labs:delete`, `sessions:read` and
+  `sessions:delete` cover the caller's own records. `labs:manage_any` and
+  `sessions:manage_any` (admins) lift that.
+- **Current role, not the token's.** The role in a token is as old as the token (up to an hour,
+  or seven days through a refresh). `middleware.CurrentUser` reads the user's role and status
+  from the database on every request, so a demoted, deactivated or deleted user loses access at
+  once. It costs one small query per request.
+
+| Role | Has |
+|---|---|
+| `student` | read published labs and their specs; create, read and end their own sessions; their own profile and progress |
+| `instructor` | the above, plus create labs, update and delete their own labs, write lab specs, set session options |
+| `admin` | the above, plus read unpublished labs, manage anyone's labs and sessions, list users, change roles and statuses, read the audit log |
+
+An unknown or missing role has no permissions.
+
+**Holes this closed** (found while moving the checks into the table):
+
+- Any logged-in user could create, change or delete a lab's specs. Now `lab_specs:write`.
+- Any logged-in user could set the status of any session (`PUT /sessions/{id}/status`). Now
+  admins only.
+
+**Not built:** scoping by team or organisation, permissions per lab (for example "instructor of
+this course only"), and custom roles. `lab_specs:write` isn't limited to the instructor's own
+labs yet.
+
+## Audit log (built)
+
+- **What is recorded.** Every request that changes something, every request that was refused
+  (401, 403) or failed, and reads of other people's data (the user list, the audit log itself).
+  `AUDIT_READS=true` also records every successful read.
+- **What an entry holds.** Who (user ID and role at the time), what (the permission used, such
+  as `users:update_role`, or `auth:login`), on which record (data type and ID), the outcome
+  (`success`, `denied`, `failure`), the HTTP method, path and status, from where (IP address,
+  user agent) and when. Role and status changes keep the old and new values. A failed login
+  keeps the username that was tried.
+- **What is never recorded.** Request bodies, so no passwords or tokens, and no query strings.
+- **Immutable in the database.** Migration 004 adds triggers that refuse `UPDATE`, `DELETE` and
+  `TRUNCATE` on `audit_logs` for every database user, including the API's. The API has no
+  route that changes an entry. An entry keeps the user's ID after the user is deleted.
+- **Queryable.** `GET /api/v1/admin/audit-logs` (permission `audit:read`), filtered by user,
+  action, data type, record, outcome, IP address and time range, newest first.
+
+**What it doesn't meet yet:**
+
+- **"Separate from your app data."** The log is a table in the app's database. Whoever can
+  administer that database can drop the triggers. `audit.Recorder` is an interface so the log
+  can move without touching the callers. Options: a second PostgreSQL database with a
+  write-only user for the API; or shipping entries to an external store (object storage with
+  object lock, or a log service). The second gives the stronger answer.
+- **Retention and export.** No retention period, archive or export is set.
+- **Writes are best effort.** If the log can't be written, the request still succeeds and the
+  failure goes to the server log. The strict alternative is to refuse the request.
+- **Actions outside the API.** Changes made straight in the database or the cluster, and what
+  a student does inside a lab VM, aren't in this log.
+
+## Customer isolation (not decided)
+
+Today there is one set of tables for everyone and no notion of a customer. Rows are kept apart
+only by the per-user checks above. What a "customer" is has to be decided first (a company, a
+school, a course), then how far apart customers are kept:
+
+| | A. Organisation column, enforced by the database | B. A schema or database per customer | C. A cluster per customer |
+|---|---|---|---|
+| How | every table gets `organization_id`; PostgreSQL row-level security filters every query by it | each customer's tables are separate; the API picks the schema or database per request | a full deployment per customer |
+| Isolation | strong if every table has the policy; one missed table leaks | stronger and easier to show an auditor | strongest |
+| Cost to run | one database, one migration run | a migration run per customer; more connections | highest by far |
+| Fits | many small customers | fewer, larger customers; data-residency asks | regulated or very large customers |
+
+**Recommendation:** A, with a Kubernetes namespace per organisation for lab sessions, plus
+resource quotas and network policies on each namespace. Offer C to a customer who asks for it.
+It is the cheapest to add while the schema is small, and it is the base that team-scoped
+permissions (question 1) and an organisation on every audit entry (question 2) build on.
+
+**Network isolation between lab pods.** Flannel on its own doesn't enforce Kubernetes network
+policies. The local cluster is k3s, which runs its own network policy controller beside
+Flannel unless started with `--disable-network-policy`; on 2026-10-01 that flag wasn't set and
+the cluster had no policies, so every lab pod can reach every other. Enforcement hasn't been
+tested. A production cluster that isn't k3s needs a CNI that enforces policies (Calico,
+Cilium, or Canal to keep Flannel).
+
+## Still to decide
+
+1. What a customer is, and option A, B or C.
+2. Where the audit log lives (second database or an external store), how long it is kept, and
+   whether a failed audit write should refuse the request.
+3. Whether instructors may write specs only for their own labs.
+4. Whether to test and add network policies on the local cluster.

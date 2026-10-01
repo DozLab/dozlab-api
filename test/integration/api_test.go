@@ -38,7 +38,7 @@ func (suite *APITestSuite) SetupSuite() {
 	suite.NoError(err)
 	
 	// Auto migrate the schema
-	err = gormDB.AutoMigrate(&models.User{}, &models.Lab{}, &models.LabSpec{})
+	err = gormDB.AutoMigrate(&models.User{}, &models.Lab{}, &models.LabSpec{}, &models.AuditLog{})
 	suite.NoError(err)
 	
 	sqlDB, err := gormDB.DB()
