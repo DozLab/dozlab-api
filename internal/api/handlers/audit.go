@@ -12,14 +12,14 @@ import (
 	"github.com/google/uuid"
 )
 
-// AuditHandler serves the audit log. It can only read it: entries are written by
-// audit.Middleware and never changed.
+// AuditHandler serves the audit log. It can only read it, through the audit store's read-only
+// login; entries are written by audit.Middleware through another login and never changed.
 type AuditHandler struct {
-	db *database.Database
+	db *database.Database // nil when the read-only connection isn't configured
 }
 
-func NewAuditHandler(db *database.Database) *AuditHandler {
-	return &AuditHandler{db: db}
+func NewAuditHandler(reader *database.Database) *AuditHandler {
+	return &AuditHandler{db: reader}
 }
 
 // ListAuditLogs returns audit entries, newest first.
@@ -42,6 +42,13 @@ func NewAuditHandler(db *database.Database) *AuditHandler {
 // @Failure 400 {object} ErrorResponse
 // @Router /api/v1/admin/audit-logs [get]
 func (h *AuditHandler) ListAuditLogs(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Reading the audit log is not configured (AUDIT_READ_DATABASE_URL)",
+		})
+		return
+	}
+
 	page, limit := 1, 50
 	if p, err := strconv.Atoi(c.Query("page")); err == nil && p > 0 {
 		page = p

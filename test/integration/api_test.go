@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"dozlab-backend/internal/api"
+	"dozlab-backend/internal/audit"
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
 	"dozlab-backend/internal/websocket"
@@ -38,7 +39,7 @@ func (suite *APITestSuite) SetupSuite() {
 	suite.NoError(err)
 	
 	// Auto migrate the schema
-	err = gormDB.AutoMigrate(&models.User{}, &models.Lab{}, &models.LabSpec{}, &models.AuditLog{})
+	err = gormDB.AutoMigrate(&models.User{}, &models.Lab{}, &models.LabSpec{})
 	suite.NoError(err)
 	
 	sqlDB, err := gormDB.DB()
@@ -48,7 +49,8 @@ func (suite *APITestSuite) SetupSuite() {
 	
 	// Setup router
 	suite.router = gin.New()
-	api.SetupRoutes(suite.router, suite.db, nil, websocket.NewManager()) // no notification tests here
+	// no notification tests here; audit entries go to the server log
+	api.SetupRoutes(suite.router, suite.db, nil, websocket.NewManager(), &audit.Store{Writer: audit.LogRecorder{}})
 }
 
 func (suite *APITestSuite) TearDownSuite() {

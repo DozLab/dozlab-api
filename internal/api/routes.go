@@ -21,7 +21,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.EventBusService, wsManager *websocket.Manager) {
+// auditStore is the audit log's own database (audit.Open); the app's database has no audit table.
+func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.EventBusService, wsManager *websocket.Manager, auditStore *audit.Store) {
 	// Initialize service clients for microservices communication
 	serviceConfig := services.ServiceConfig{
 		WebSocketServiceURL:  os.Getenv("WEBSOCKET_SERVICE_URL"),
@@ -51,7 +52,7 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 	labHandler := handlers.NewLabHandler(db)
 	authHandler := handlers.NewAuthHandler(db)
 	notificationHandler := handlers.NewNotificationHandler(eventBus)
-	auditHandler := handlers.NewAuditHandler(db)
+	auditHandler := handlers.NewAuditHandler(auditStore.Reader)
 	hostCheckHandler := handlers.NewHostCheckHandler()
 	
 	// Initialize CRD-based lab session handler
@@ -90,7 +91,7 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 	// first so that requests refused for a bad token are recorded too. A change that can't be
 	// recorded is refused (503) unless AUDIT_REQUIRED=false. AUDIT_READS=true also records every
 	// successful read.
-	v1.Use(audit.Middleware(audit.NewDBRecorder(db), audit.Options{
+	v1.Use(audit.Middleware(auditStore.Writer, audit.Options{
 		Reads:    os.Getenv("AUDIT_READS") == "true",
 		Required: os.Getenv("AUDIT_REQUIRED") != "false",
 	}))

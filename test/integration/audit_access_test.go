@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"dozlab-backend/internal/api"
+	"dozlab-backend/internal/audit"
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
 	"dozlab-backend/internal/websocket"
@@ -23,12 +25,25 @@ import (
 
 const testSecret = "test-jwt-secret-key-32-characters-long"
 
-// The real router (api.SetupRoutes) on an in-memory database, with one user per role.
+// The real router (api.SetupRoutes) on an in-memory app database and a separate in-memory audit
+// store, with one user per role.
 type accessEnv struct {
-	router *gin.Engine
-	db     *database.Database
-	users  map[string]models.User
-	tokens map[string]string
+	router  *gin.Engine
+	db      *database.Database // the app's database: no audit table
+	auditDB *database.Database // the audit store
+	users   map[string]models.User
+	tokens  map[string]string
+}
+
+func memoryDB(t *testing.T, tables ...interface{}) *database.Database {
+	t.Helper()
+	gormDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := gormDB.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1) // one connection, so every query sees the same in-memory database
+	require.NoError(t, gormDB.AutoMigrate(tables...))
+	return &database.Database{DB: gormDB, SqlDB: sqlDB}
 }
 
 func newAccessEnv(t *testing.T) *accessEnv {
@@ -36,20 +51,16 @@ func newAccessEnv(t *testing.T) *accessEnv {
 	t.Setenv("JWT_SECRET", testSecret)
 	gin.SetMode(gin.TestMode)
 
-	gormDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	sqlDB, err := gormDB.DB()
-	require.NoError(t, err)
-	sqlDB.SetMaxOpenConns(1) // one connection, so every query sees the same in-memory database
-	require.NoError(t, gormDB.AutoMigrate(&models.User{}, &models.Lab{}, &models.LabSpec{}, &models.Session{}, &models.AuditLog{}))
-
 	env := &accessEnv{
-		router: gin.New(),
-		db:     &database.Database{DB: gormDB, SqlDB: sqlDB},
-		users:  map[string]models.User{},
-		tokens: map[string]string{},
+		router:  gin.New(),
+		db:      memoryDB(t, &models.User{}, &models.Lab{}, &models.LabSpec{}, &models.Session{}),
+		auditDB: memoryDB(t, &models.AuditLog{}),
+		users:   map[string]models.User{},
+		tokens:  map[string]string{},
 	}
-	api.SetupRoutes(env.router, env.db, nil, websocket.NewManager())
+	gormDB := env.db.DB
+	store := &audit.Store{Writer: audit.NewDBRecorder(env.auditDB), Reader: env.auditDB}
+	api.SetupRoutes(env.router, env.db, nil, websocket.NewManager(), store)
 
 	hash, err := auth.HashPassword("Correct-Horse-9!")
 	require.NoError(t, err)
@@ -80,7 +91,7 @@ func (e *accessEnv) do(method, path, role, body string) *httptest.ResponseRecord
 func (e *accessEnv) entries(t *testing.T, where string, args ...interface{}) []models.AuditLog {
 	t.Helper()
 	var out []models.AuditLog
-	require.NoError(t, e.db.DB.Where(where, args...).Order("created_at").Find(&out).Error)
+	require.NoError(t, e.auditDB.DB.Where(where, args...).Order("created_at").Find(&out).Error)
 	return out
 }
 
@@ -189,6 +200,7 @@ func TestAudit_WhoDidWhatFromWhereAndWhen(t *testing.T) {
 		e := got[0]
 		require.NotNil(t, e.UserID)
 		assert.Equal(t, env.users["student"].ID, *e.UserID)
+		assert.Equal(t, "student1", deref(e.ActorUsername))
 		assert.Equal(t, "student", deref(e.ActorRole))
 		assert.Equal(t, "labs", deref(e.ResourceType))
 		assert.Equal(t, "POST", e.Method)
@@ -259,10 +271,11 @@ func TestAudit_WhoDidWhatFromWhereAndWhen(t *testing.T) {
 		assert.JSONEq(t, `{"username":"nobody"}`, string(*got[1].Metadata))
 		assert.Equal(t, "success", got[2].Outcome)
 		assert.Equal(t, env.users["admin"].ID, *got[2].UserID)
+		assert.Equal(t, "admin1", deref(got[2].ActorUsername))
 
 		// Nothing in the whole log holds a password
 		var all []models.AuditLog
-		require.NoError(t, env.db.DB.Find(&all).Error)
+		require.NoError(t, env.auditDB.DB.Find(&all).Error)
 		raw, err := json.Marshal(all)
 		require.NoError(t, err)
 		for _, secret := range []string{"Wrong-Guess-1!", "Wrong-Guess-2!", "Correct-Horse-9!"} {
@@ -276,7 +289,7 @@ func TestAudit_WhatIsRecorded(t *testing.T) {
 
 	count := func() int64 {
 		var n int64
-		require.NoError(t, env.db.DB.Model(&models.AuditLog{}).Count(&n).Error)
+		require.NoError(t, env.auditDB.DB.Model(&models.AuditLog{}).Count(&n).Error)
 		return n
 	}
 
@@ -378,8 +391,8 @@ func TestAudit_ChangeIsRefusedWhenItCannotBeRecorded(t *testing.T) {
 	assert.Equal(t, "203.0.113.7", deref(pair[0].IPAddress))
 	assert.Equal(t, "success", pair[1].Outcome)
 
-	// Break the audit log
-	require.NoError(t, env.db.DB.Exec("DROP TABLE audit_logs").Error)
+	// Break the audit store
+	require.NoError(t, env.auditDB.DB.Exec("DROP TABLE audit_logs").Error)
 	before := labs()
 
 	w := env.do("POST", "/api/v1/labs/", "instructor", `{"name":"Unrecorded lab","slug":"unrecorded-lab"}`)
@@ -408,7 +421,93 @@ func TestAudit_NotRequiredLetsTheChangeThrough(t *testing.T) {
 	assert.Len(t, env.entries(t, "outcome = ?", "attempted"), 0)
 	assert.Len(t, env.entries(t, "action = ?", "labs:create"), 1)
 
-	require.NoError(t, env.db.DB.Exec("DROP TABLE audit_logs").Error)
+	require.NoError(t, env.auditDB.DB.Exec("DROP TABLE audit_logs").Error)
 	w := env.do("POST", "/api/v1/labs/", "instructor", `{"name":"Unrecorded lab","slug":"unrecorded-lab"}`)
 	assert.Equal(t, 201, w.Code, w.Body.String())
+}
+
+// The audit log is not in the app's database, and survives what happens there.
+func TestAudit_IsApartFromAppData(t *testing.T) {
+	env := newAccessEnv(t)
+	assert.False(t, env.db.DB.Migrator().HasTable("audit_logs"), "the app's database must have no audit table")
+
+	target := env.users["student"]
+	require.Equal(t, 200, env.do("PUT", "/api/v1/admin/users/"+target.ID.String()+"/role", "admin", `{"role":"instructor"}`).Code)
+
+	// Remove both users from the app's database: the entry still says who did what to whom
+	require.NoError(t, env.db.DB.Exec("DELETE FROM users").Error)
+	got := env.entries(t, "action = ?", "users:update_role")
+	require.Len(t, got, 1)
+	assert.Equal(t, env.users["admin"].ID, *got[0].UserID)
+	assert.Equal(t, "admin1", deref(got[0].ActorUsername))
+	assert.Equal(t, "admin", deref(got[0].ActorRole))
+	assert.Equal(t, target.ID.String(), deref(got[0].ResourceID))
+}
+
+// The admin endpoint is off, not broken, when the read-only connection isn't configured.
+func TestAudit_ReadingNeedsTheReadConnection(t *testing.T) {
+	env := newAccessEnv(t)
+	router := gin.New()
+	api.SetupRoutes(router, env.db, nil, websocket.NewManager(), &audit.Store{Writer: audit.NewDBRecorder(env.auditDB)})
+	env.router = router
+	w := env.do("GET", "/api/v1/admin/audit-logs", "admin", "")
+	assert.Equal(t, 503, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "AUDIT_READ_DATABASE_URL")
+}
+
+// With a spool, an unreachable store doesn't stop the API: entries wait on disk and are
+// delivered when the store is back. Only when the spool can't be written either is a change
+// refused.
+func TestAudit_SpoolCarriesTheAPIThroughAStoreOutage(t *testing.T) {
+	env := newAccessEnv(t)
+	dir := t.TempDir()
+	spool, err := audit.NewSpool(audit.NewDBRecorder(env.auditDB), dir)
+	require.NoError(t, err)
+	router := gin.New()
+	api.SetupRoutes(router, env.db, nil, websocket.NewManager(), &audit.Store{Writer: spool, Reader: env.auditDB})
+	env.router = router
+
+	// The store goes away
+	require.NoError(t, env.auditDB.DB.Exec("ALTER TABLE audit_logs RENAME TO audit_logs_away").Error)
+
+	// Changes still work, and their entries wait in the spool
+	require.Equal(t, 201, env.do("POST", "/api/v1/labs/", "instructor", newLab).Code)
+	require.Equal(t, 403, env.do("POST", "/api/v1/labs/", "student", newLab).Code)
+	pending := spool.Pending()
+	assert.Len(t, pending, 4, "an attempted and an outcome entry for each of the two requests")
+
+	// While the store is away, forwarding delivers nothing and loses nothing
+	n, err := spool.Forward()
+	assert.Equal(t, 0, n)
+	assert.Error(t, err)
+	assert.Len(t, spool.Pending(), 4)
+
+	// The store comes back: everything is delivered, in order, with its original time
+	require.NoError(t, env.auditDB.DB.Exec("ALTER TABLE audit_logs_away RENAME TO audit_logs").Error)
+	n, err = spool.Forward()
+	require.NoError(t, err)
+	assert.Equal(t, 4, n)
+	assert.Len(t, spool.Pending(), 0)
+	created := env.entries(t, "action = ? AND outcome = ?", "labs:create", "success")
+	require.Len(t, created, 1)
+	assert.Equal(t, env.users["instructor"].ID, *created[0].UserID)
+	assert.Len(t, env.entries(t, "action = ? AND outcome = ?", "labs:create", "denied"), 1)
+	assert.Len(t, env.entries(t, "outcome = ?", "attempted"), 2)
+
+	// Delivering an entry twice (a crash between delivery and clean-up) doesn't duplicate it
+	require.NoError(t, spool.Record(&created[0]))
+	var total int64
+	require.NoError(t, env.auditDB.DB.Model(&models.AuditLog{}).Where("id = ?", created[0].ID).Count(&total).Error)
+	assert.Equal(t, int64(1), total)
+
+	// Neither the store nor the spool can be written: the change is refused
+	require.NoError(t, env.auditDB.DB.Exec("ALTER TABLE audit_logs RENAME TO audit_logs_away").Error)
+	require.NoError(t, os.RemoveAll(dir))
+	var labsBefore int64
+	require.NoError(t, env.db.DB.Model(&models.Lab{}).Count(&labsBefore).Error)
+	w := env.do("POST", "/api/v1/labs/", "instructor", `{"name":"Unrecorded lab","slug":"unrecorded-lab"}`)
+	assert.Equal(t, 503, w.Code, w.Body.String())
+	var labsAfter int64
+	require.NoError(t, env.db.DB.Model(&models.Lab{}).Count(&labsAfter).Error)
+	assert.Equal(t, labsBefore, labsAfter)
 }

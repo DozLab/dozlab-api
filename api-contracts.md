@@ -174,12 +174,16 @@ Audit log filters (query parameters): `user_id`, `action` (for example `users:up
 `labs:create`, `auth:login`), `resource_type`, `resource_id`, `outcome` (`attempted`, `success`,
 `denied`, `failure`), `request_id`, `ip_address`, `from` and `to` (RFC 3339), `page`, `limit` (up
 to 200, default 50). The response is `{"audit_logs": [...], "pagination": {"page", "limit",
-"total"}}`. Entries can't be changed or deleted, by the API or in the database; they are removed
-after 30 days (`AUDIT_RETENTION_DAYS`).
+"total"}}`. The log is in a database of its own that the API can only add to. Entries can't be
+changed or deleted by anyone; the store removes them after its retention (30 days by default).
+Each entry has the user's ID, username and role at the time, `created_at` (when it happened) and
+`received_at` (when the store got it). The endpoint answers 503 when the read-only connection
+(`AUDIT_READ_DATABASE_URL`) isn't configured.
 
 A change has two entries with the same `request_id`: `attempted`, written before it runs, and
 the outcome. If the first can't be written, the change is refused with 503 `{"error": "The audit
-log is unavailable, so this change was refused"}`.
+log is unavailable, so this change was refused"}`. With a spool directory (`AUDIT_SPOOL_DIR`),
+entries wait on disk while the store is unreachable and the change goes through.
 
 ### Access Control
 Every route needs a permission, and each role has a fixed set (`internal/authz/authz.go`). A

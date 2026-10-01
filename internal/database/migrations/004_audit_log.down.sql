@@ -1,19 +1,16 @@
-DROP TRIGGER IF EXISTS audit_logs_no_truncate ON audit_logs;
-DROP TRIGGER IF EXISTS audit_logs_no_change ON audit_logs;
-DROP FUNCTION IF EXISTS audit_logs_append_only();
-
--- NOT VALID: entries may name users that no longer exist
-ALTER TABLE audit_logs ADD CONSTRAINT audit_logs_user_id_fkey
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL NOT VALID;
-
-DROP INDEX IF EXISTS idx_audit_request;
-DROP INDEX IF EXISTS idx_audit_outcome;
-DROP INDEX IF EXISTS idx_audit_resource;
-
-ALTER TABLE audit_logs DROP COLUMN IF EXISTS request_id;
-ALTER TABLE audit_logs DROP COLUMN IF EXISTS metadata;
-ALTER TABLE audit_logs DROP COLUMN IF EXISTS status_code;
-ALTER TABLE audit_logs DROP COLUMN IF EXISTS path;
-ALTER TABLE audit_logs DROP COLUMN IF EXISTS method;
-ALTER TABLE audit_logs DROP COLUMN IF EXISTS outcome;
-ALTER TABLE audit_logs DROP COLUMN IF EXISTS actor_role;
+-- The table as migration 001 created it
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    action VARCHAR(100) NOT NULL,
+    resource_type VARCHAR(50),
+    resource_id VARCHAR(255),
+    old_values JSONB,
+    new_values JSONB,
+    ip_address INET,
+    user_agent TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);
+CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(created_at);

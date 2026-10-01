@@ -91,8 +91,8 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 	audit.Annotate(c).UserID = &user.ID
+	audit.Annotate(c).Username = user.Username
 	audit.SetResource(c, "users", user.ID.String())
-	audit.SetMeta(c, "username", user.Username)
 
 	// Generate tokens
 	tokens, err := auth.GenerateTokenPair(user.ID, user.Username, user.Email, user.Role, os.Getenv("JWT_SECRET"))
@@ -165,6 +165,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	audit.Annotate(c).UserID = &user.ID
+	audit.Annotate(c).Username = user.Username
 	audit.SetResource(c, "users", user.ID.String())
 
 	// Check if user is active

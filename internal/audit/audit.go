@@ -1,6 +1,7 @@
-// Package audit records who did what, to which record, from where and when, and whether it
-// was allowed. Entries go to the audit_logs table, which the database keeps append-only
-// (migrations/004_audit_log.up.sql). Request bodies are never recorded, so passwords and
+// Package audit records who did what, to which record, from where and when, and how it ended.
+//
+// Entries go to the audit store: a database apart from the app's, which the API can only add
+// to (internal/database/audit_migrations). Request bodies are never recorded, so passwords and
 // tokens can't end up in the log; handlers add the details worth keeping with Annotate.
 package audit
 
@@ -9,8 +10,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
-	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -25,25 +26,9 @@ const (
 	OutcomeFailure   = "failure" // any other 4xx or 5xx
 )
 
-// Recorder stores audit entries. The API has one implementation, DBRecorder; the interface is
-// here so the log can move to a store of its own without touching the callers.
+// Recorder adds entries to the audit log.
 type Recorder interface {
 	Record(entry *models.AuditLog) error
-}
-
-// DBRecorder writes entries to the audit_logs table.
-type DBRecorder struct {
-	db *database.Database
-}
-
-// NewDBRecorder returns a Recorder that writes to db.
-func NewDBRecorder(db *database.Database) *DBRecorder {
-	return &DBRecorder{db: db}
-}
-
-// Record adds one entry.
-func (r *DBRecorder) Record(entry *models.AuditLog) error {
-	return r.db.DB.Create(entry).Error
 }
 
 const contextKey = "audit"
@@ -55,8 +40,10 @@ type Details struct {
 	Action       string
 	ResourceType string
 	ResourceID   string
-	// UserID names the user when the request has no token: a login or a registration.
-	UserID *uuid.UUID
+	// UserID and Username name the user when the request has no token: a login or a
+	// registration.
+	UserID   *uuid.UUID
+	Username string
 	// Old and New are the values a change replaced and set (a role, a status).
 	Old, New map[string]interface{}
 	// Metadata is anything else worth keeping, such as the username a failed login tried.
@@ -127,6 +114,7 @@ func Middleware(recorder Recorder, opts Options) gin.HandlerFunc {
 				IPAddress:  optional(c.ClientIP()),
 				UserAgent:  optional(c.Request.UserAgent()),
 				ResourceID: optional(firstParam(c, "labId", "id")),
+				CreatedAt:  time.Now(),
 			}
 			if err := recorder.Record(attempt); err != nil {
 				log.Printf("AUDIT WRITE FAILED, request refused: %v (%s %s)", err, method, c.Request.URL.Path)
@@ -155,20 +143,22 @@ func Middleware(recorder Recorder, opts Options) gin.HandlerFunc {
 			Path:       c.Request.URL.Path, // no query string: it can carry tokens
 			StatusCode: status,
 			UserID:     details.UserID,
+			CreatedAt:  time.Now(),
 		}
 		if entry.Action == "" {
 			entry.Action = method + " " + routeOf(c)
 		}
+		// The entry carries who it was in full: it must stay readable after the user is gone
 		if id, ok := c.Get("user_id"); ok {
 			if uid, ok := id.(uuid.UUID); ok {
 				entry.UserID = &uid
 			}
 		}
-		if role, ok := c.Get("role"); ok {
-			if s, ok := role.(string); ok && s != "" {
-				entry.ActorRole = &s
-			}
+		entry.ActorUsername = optional(contextString(c, "username"))
+		if entry.ActorUsername == nil {
+			entry.ActorUsername = optional(details.Username)
 		}
+		entry.ActorRole = optional(contextString(c, "role"))
 		resourceType, resourceID := details.ResourceType, details.ResourceID
 		if resourceType == "" {
 			resourceType = resourceTypeOf(entry.Action)
@@ -223,6 +213,15 @@ func firstParam(c *gin.Context, names ...string) string {
 	for _, name := range names {
 		if v := c.Param(name); v != "" {
 			return v
+		}
+	}
+	return ""
+}
+
+func contextString(c *gin.Context, key string) string {
+	if v, ok := c.Get(key); ok {
+		if s, ok := v.(string); ok {
+			return s
 		}
 	}
 	return ""
