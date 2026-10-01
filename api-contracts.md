@@ -81,10 +81,10 @@ vCPUs, memory and disk. See `docs/decision.md`, "Keeping resources to a minimum"
 
 ### Lab Specifications (Sidecar Support)
 - `GET /api/v1/labs/{labId}/specs` - Get all lab specs
-- `POST /api/v1/labs/{labId}/specs` - Create new spec version
+- `POST /api/v1/labs/{labId}/specs` - Create new spec version (the lab's creator, or an admin)
 - `GET /api/v1/labs/{labId}/specs/{version}` - Get specific spec version
-- `PUT /api/v1/labs/{labId}/specs/{version}` - Update spec version
-- `DELETE /api/v1/labs/{labId}/specs/{version}` - Delete spec version
+- `PUT /api/v1/labs/{labId}/specs/{version}` - Update spec version (the lab's creator, or an admin)
+- `DELETE /api/v1/labs/{labId}/specs/{version}` - Delete spec version (the lab's creator, or an admin)
 
 ### Session Management
 - `GET /api/v1/sessions` - List user sessions

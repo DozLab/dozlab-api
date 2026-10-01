@@ -316,6 +316,38 @@ func (h *LabHandler) DeleteLab(c *gin.Context) {
 
 // Lab Specs handlers with composite key support
 
+// ownsLab reports whether the caller may change the lab's specs: the lab's creator, or anyone
+// with labs:manage_any (admins). Otherwise it answers 404 for a lab that doesn't exist, or 403,
+// and returns false. Route-level lab_specs:write only says the caller is an instructor or admin.
+func (h *LabHandler) ownsLab(c *gin.Context, labID uuid.UUID) bool {
+	audit.SetResource(c, "labs", labID.String())
+
+	var lab models.Lab
+	if err := h.db.DB.Select("id", "created_by").First(&lab, "id = ?", labID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "Lab not found",
+			})
+			return false
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Database error",
+		})
+		return false
+	}
+	if can(c, authz.LabsManageAny) {
+		return true
+	}
+	userID, _ := c.Get("user_id")
+	if lab.CreatedBy == nil || *lab.CreatedBy != userID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "You don't have permission to change this lab's specs",
+		})
+		return false
+	}
+	return true
+}
+
 func (h *LabHandler) GetLabSpecs(c *gin.Context) {
 	labIDStr := c.Param("labId")
 	labID, err := uuid.Parse(labIDStr)
@@ -346,6 +378,10 @@ func (h *LabHandler) CreateLabSpec(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Invalid lab ID",
 		})
+		return
+	}
+
+	if !h.ownsLab(c, labID) {
 		return
 	}
 
@@ -430,6 +466,10 @@ func (h *LabHandler) UpdateLabSpec(c *gin.Context) {
 		return
 	}
 
+	if !h.ownsLab(c, labID) {
+		return
+	}
+
 	versionStr := c.Param("version")
 	version, err := strconv.Atoi(versionStr)
 	if err != nil {
@@ -506,6 +546,10 @@ func (h *LabHandler) DeleteLabSpec(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Invalid lab ID",
 		})
+		return
+	}
+
+	if !h.ownsLab(c, labID) {
 		return
 	}
 

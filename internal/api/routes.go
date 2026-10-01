@@ -135,6 +135,7 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 				
 				// Lab specifications routes with composite key support
 				labs.GET("/:labId/specs", require(authz.LabSpecsRead), labHandler.GetLabSpecs)
+				// Writing specs: one's own labs; labs:manage_any (admins) lifts that in the handler
 				labs.POST("/:labId/specs", require(authz.LabSpecsWrite), labHandler.CreateLabSpec)
 				labs.GET("/:labId/specs/:version", require(authz.LabSpecsRead), labHandler.GetLabSpec)
 				labs.PUT("/:labId/specs/:version", require(authz.LabSpecsWrite), labHandler.UpdateLabSpec)

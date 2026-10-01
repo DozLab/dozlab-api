@@ -1168,8 +1168,7 @@ An unknown or missing role has no permissions.
   admins only.
 
 **Not built:** scoping by team or organisation, permissions per lab (for example "instructor of
-this course only"), and custom roles. `lab_specs:write` isn't limited to the instructor's own
-labs yet.
+this course only"), and custom roles.
 
 ## Audit log (built)
 
@@ -1273,5 +1272,5 @@ Cilium, or Canal to keep Flannel).
    add an external append-only store, and whether entries are archived before the 30-day
    purge. Decided on 2026-10-01: a separate database the API can only add to, kept 30 days by
    default, and a change that can't be recorded is refused.
-3. Whether instructors may write specs only for their own labs.
+3. Done (2026-10-01): instructors write specs only for their own labs; admins for any.
 4. Whether to test and add network policies on the local cluster.
