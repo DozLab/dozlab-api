@@ -62,7 +62,7 @@ DozLab implements **Kubernetes sidecar architecture** with:
 ### Authentication & User Management
 - `POST /api/v1/auth/register` - User registration
 - `POST /api/v1/auth/login` - User authentication
-- `POST /api/v1/auth/refresh` - Refresh JWT token
+- `POST /api/v1/auth/refresh` - Refresh JWT token. The new tokens carry the user's current role, username and email; a deactivated or deleted user gets 401
 - `GET /api/v1/users/profile` - Get user profile
 - `PUT /api/v1/users/profile` - Update user profile
 

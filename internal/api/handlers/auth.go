@@ -244,11 +244,44 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Generate new token pair
-	tokens, err := auth.RefreshAccessToken(req.RefreshToken, os.Getenv("JWT_SECRET"))
+	claims, err := auth.ValidateToken(req.RefreshToken, os.Getenv("JWT_SECRET"))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error": "Invalid or expired refresh token",
+		})
+		return
+	}
+	audit.Annotate(c).UserID = &claims.UserID
+	audit.Annotate(c).Username = claims.Username
+	audit.SetResource(c, "users", claims.UserID.String())
+
+	// The token only says who the user was when it was issued, up to seven days ago. The new
+	// tokens are for the user as they are now: a deactivated or deleted user gets none, and a
+	// changed role, username or email is what goes into them.
+	var user models.User
+	if err := h.db.DB.First(&user, "id = ?", claims.UserID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "User no longer exists",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Database error",
+		})
+		return
+	}
+	if !user.IsActive {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "User account is inactive",
+		})
+		return
+	}
+
+	tokens, err := auth.GenerateTokenPair(user.ID, user.Username, user.Email, user.Role, os.Getenv("JWT_SECRET"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to generate tokens",
 		})
 		return
 	}
