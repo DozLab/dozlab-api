@@ -68,7 +68,7 @@ DozLab implements **Kubernetes sidecar architecture** with:
 
 ### Lab Management
 - `GET /api/v1/labs` - List available labs
-- `POST /api/v1/labs` - Create new lab (admin)
+- `POST /api/v1/labs` - Create new lab (instructor or admin; a student gets 403)
 - `GET /api/v1/labs/{labId}` - Get lab details
 - `PUT /api/v1/labs/{labId}` - Update lab (admin)
 - `DELETE /api/v1/labs/{labId}` - Delete lab (admin)
@@ -92,6 +92,18 @@ vCPUs, memory and disk. See `docs/decision.md`, "Keeping resources to a minimum"
 - `GET /api/v1/sessions/{id}` - Get session details
 - `PUT /api/v1/sessions/{id}/status` - Update session status
 - `DELETE /api/v1/sessions/{id}` - End session
+
+### Lab Sessions (VMs)
+- `POST /api/v1/lab-sessions` - Start a session of a lab (`lab_id`)
+- `GET /api/v1/lab-sessions` - List the caller's sessions
+- `GET /api/v1/lab-sessions/{id}` - Session details and cluster status
+- `DELETE /api/v1/lab-sessions/{id}` - End a session
+
+Session options are for instructors and admins. A student who sends `timeout` or any of
+`config.enable_terminal`, `config.enable_vscode`, `config.enable_ssh` gets 403, with the option
+names in `options`. A student who sends none gets the defaults. Anyone may set
+`config.vscode_password`: it is the caller's own credential, not an option. See
+`docs/decision.md`, "What phase 1 needs in the API".
 
 ### Kubernetes Lab Deployment
 - `POST /api/v1/k8s/deploy` - Deploy lab with sidecar architecture

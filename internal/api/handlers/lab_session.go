@@ -38,6 +38,43 @@ func NewLabSessionHandler(db *database.Database, k8sClient dynamic.Interface) *L
 	}
 }
 
+// SessionConfig is the config part of a session request. No resources here: the VM's size comes
+// from the lab (labVMResources). The switches are pointers so a request that sends one, even as
+// false, can be told apart from one that doesn't.
+type SessionConfig struct {
+	VSCodePassword string `json:"vscode_password,omitempty"`
+	EnableTerminal *bool  `json:"enable_terminal,omitempty"`
+	EnableVSCode   *bool  `json:"enable_vscode,omitempty"`
+	EnableSSH      *bool  `json:"enable_ssh,omitempty"`
+}
+
+// CreateLabSessionRequest is the body of POST /api/v1/lab-sessions.
+type CreateLabSessionRequest struct {
+	LabID   uuid.UUID     `json:"lab_id" binding:"required"`
+	Config  SessionConfig `json:"config,omitempty"`
+	Timeout string        `json:"timeout,omitempty"`
+}
+
+// sessionOptions returns the names of the session options the request sets. Only instructors
+// and admins may set them (canManageLabs). The VS Code password is the caller's own credential
+// and not an option, so anyone may choose it (owner decision, 2026-10-01).
+func (r CreateLabSessionRequest) sessionOptions() []string {
+	var set []string
+	if r.Timeout != "" {
+		set = append(set, "timeout")
+	}
+	if r.Config.EnableTerminal != nil {
+		set = append(set, "config.enable_terminal")
+	}
+	if r.Config.EnableVSCode != nil {
+		set = append(set, "config.enable_vscode")
+	}
+	if r.Config.EnableSSH != nil {
+		set = append(set, "config.enable_ssh")
+	}
+	return set
+}
+
 // CreateLabSession creates a new lab session using CRDs
 // @Summary Create a new lab session
 // @Description Creates a new lab session environment using Kubernetes CRDs
@@ -48,6 +85,7 @@ func NewLabSessionHandler(db *database.Database, k8sClient dynamic.Interface) *L
 // @Success 202 {object} object
 // @Failure 400 {object} ErrorResponse
 // @Failure 401 {object} ErrorResponse
+// @Failure 403 {object} ErrorResponse "A student set a session option"
 // @Failure 500 {object} ErrorResponse
 // @Router /api/v1/lab-sessions [post]
 func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
@@ -59,25 +97,20 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 		return
 	}
 
-	// No resources here: the VM's size comes from the lab (labVMResources)
-	type SessionConfig struct {
-		VSCodePassword string `json:"vscode_password,omitempty"`
-		EnableTerminal bool   `json:"enable_terminal,omitempty"`
-		EnableVSCode   bool   `json:"enable_vscode,omitempty"`
-		EnableSSH      bool   `json:"enable_ssh,omitempty"`
-	}
-
-	type CreateLabSessionRequest struct {
-		LabID          uuid.UUID `json:"lab_id" binding:"required"`
-		Config         SessionConfig `json:"config,omitempty"`
-		Timeout        string `json:"timeout,omitempty"`
-	}
-
 	var req CreateLabSessionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Invalid request format",
 			"details": err.Error(),
+		})
+		return
+	}
+
+	// Students can't set session options: they get the defaults (a non-persistent session)
+	if options := req.sessionOptions(); len(options) > 0 && !canManageLabs(c) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "Only instructors and admins can set session options",
+			"options": options,
 		})
 		return
 	}
