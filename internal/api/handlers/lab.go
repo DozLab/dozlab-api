@@ -69,6 +69,14 @@ func (h *LabHandler) CreateLab(c *gin.Context) {
 		return
 	}
 
+	// Only instructors and admins create labs (docs/decision.md, owner decision 2026-09-30)
+	if !canManageLabs(c) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "Only instructors and admins can create labs",
+		})
+		return
+	}
+
 	var lab models.Lab
 	if err := c.ShouldBindJSON(&lab); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
