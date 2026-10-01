@@ -120,6 +120,7 @@ func TestAccessControl_PermissionPerRole(t *testing.T) {
 		{"create a lab", "POST", "/api/v1/labs/", `{"name":"x"}`, 403, 400, 400},
 		{"update a lab", "PUT", "/api/v1/labs/" + someID, `{}`, 403, 404, 404},
 		{"delete a lab", "DELETE", "/api/v1/labs/" + someID, "", 403, 404, 404},
+		{"estimate a lab's VM", "GET", "/api/v1/labs/" + someID + "/estimate", "", 403, 404, 404},
 		{"read lab specs", "GET", "/api/v1/labs/" + someID + "/specs", "", 200, 200, 200},
 		{"create a lab spec", "POST", "/api/v1/labs/" + someID + "/specs", `{}`, 403, 400, 400},
 		{"delete a lab spec", "DELETE", "/api/v1/labs/" + someID + "/specs/1", "", 403, 404, 404},
@@ -510,4 +511,92 @@ func TestAudit_SpoolCarriesTheAPIThroughAStoreOutage(t *testing.T) {
 	var labsAfter int64
 	require.NoError(t, env.db.DB.Model(&models.Lab{}).Count(&labsAfter).Error)
 	assert.Equal(t, labsBefore, labsAfter)
+}
+
+func TestLabEstimate(t *testing.T) {
+	env := newAccessEnv(t)
+	creator := env.users["instructor"].ID
+	k8s := models.Lab{ID: uuid.New(), Name: "K8s lab", Slug: "k8s-lab", IsPublished: true, CreatedBy: &creator, VMVCPUs: 2, VMMemoryMiB: 2048, VMDiskGiB: 4}
+	draft := models.Lab{ID: uuid.New(), Name: "Draft lab", Slug: "draft-lab", IsPublished: false, CreatedBy: &creator, VMVCPUs: 1, VMMemoryMiB: 512, VMDiskGiB: 1}
+	require.NoError(t, env.db.DB.Create(&k8s).Error)
+	require.NoError(t, env.db.DB.Create(&draft).Error)
+	path := "/api/v1/labs/" + k8s.ID.String() + "/estimate"
+
+	type amount struct {
+		CPUMillicores int `json:"cpu_millicores"`
+		MemoryMiB     int `json:"memory_mib"`
+	}
+	var resp struct {
+		LabID    string `json:"lab_id"`
+		Estimate struct {
+			Persistence string `json:"persistence"`
+			VM          struct {
+				VCPUs     int `json:"vcpus"`
+				MemoryMiB int `json:"memory_mib"`
+				DiskGiB   int `json:"disk_gib"`
+			} `json:"vm"`
+			Containers []struct {
+				Name     string `json:"name"`
+				Reserved amount `json:"reserved"`
+				Maximum  amount `json:"maximum"`
+			} `json:"containers"`
+			Total struct {
+				Reserved amount `json:"reserved"`
+				Maximum  amount `json:"maximum"`
+			} `json:"total"`
+			Devices map[string]int `json:"devices"`
+			Storage struct {
+				WhileRunning      []map[string]interface{} `json:"while_running"`
+				VolumesMiB        int                      `json:"volumes_mib"`
+				NodeLocalLimitMiB int                      `json:"node_local_limit_mib"`
+				AfterStopMiB      int                      `json:"after_stop_mib"`
+			} `json:"storage"`
+		} `json:"estimate"`
+	}
+
+	w := env.do("GET", path, "instructor", "")
+	require.Equal(t, 200, w.Code, w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	e := resp.Estimate
+	assert.Equal(t, k8s.ID.String(), resp.LabID)
+	assert.Equal(t, "none", e.Persistence)
+	assert.Equal(t, 2, e.VM.VCPUs)
+	assert.Equal(t, 2048, e.VM.MemoryMiB)
+	assert.Equal(t, 4, e.VM.DiskGiB)
+	require.Len(t, e.Containers, 3)
+	assert.Equal(t, "firecracker-vm", e.Containers[0].Name)
+	assert.Equal(t, amount{100, 2176}, e.Containers[0].Reserved)
+	assert.Equal(t, amount{2000, 2176}, e.Containers[0].Maximum)
+	assert.Equal(t, amount{850, 3456}, e.Total.Reserved)
+	assert.Equal(t, amount{3500, 4736}, e.Total.Maximum)
+	assert.Equal(t, 1, e.Devices["dozlab.io/kvm"])
+	assert.Len(t, e.Storage.WhileRunning, 4)
+	assert.Equal(t, 9216, e.Storage.VolumesMiB)
+	assert.Equal(t, 8202, e.Storage.NodeLocalLimitMiB)
+	assert.Equal(t, 0, e.Storage.AfterStopMiB)
+
+	// Who may ask
+	assert.Equal(t, 200, env.do("GET", path, "admin", "").Code)
+	assert.Equal(t, 403, env.do("GET", path, "student", "").Code)
+	assert.Equal(t, 200, env.do("GET", path+"?persistence=none", "instructor", "").Code)
+
+	// Options that don't exist
+	w = env.do("GET", path+"?persistence=files", "instructor", "")
+	assert.Equal(t, 400, w.Code)
+	assert.Contains(t, w.Body.String(), "not available")
+
+	// Bad and unknown labs
+	assert.Equal(t, 400, env.do("GET", "/api/v1/labs/not-an-id/estimate", "instructor", "").Code)
+	assert.Equal(t, 404, env.do("GET", "/api/v1/labs/"+uuid.NewString()+"/estimate", "instructor", "").Code)
+
+	// An unpublished lab: its creator and admins, not another instructor
+	draftPath := "/api/v1/labs/" + draft.ID.String() + "/estimate"
+	other := models.User{ID: uuid.New(), Username: "instructor2", Email: "i2@example.com", PasswordHash: "x", Role: "instructor", IsActive: true}
+	require.NoError(t, env.db.DB.Create(&other).Error)
+	pair, err := auth.GenerateTokenPair(other.ID, other.Username, other.Email, other.Role, testSecret)
+	require.NoError(t, err)
+	env.tokens["instructor2"] = pair.AccessToken
+	assert.Equal(t, 200, env.do("GET", draftPath, "instructor", "").Code)
+	assert.Equal(t, 200, env.do("GET", draftPath, "admin", "").Code)
+	assert.Equal(t, 403, env.do("GET", draftPath, "instructor2", "").Code)
 }
