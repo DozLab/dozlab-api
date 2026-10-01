@@ -70,8 +70,8 @@ DozLab implements **Kubernetes sidecar architecture** with:
 - `GET /api/v1/labs` - List available labs
 - `POST /api/v1/labs` - Create new lab (instructor or admin; a student gets 403)
 - `GET /api/v1/labs/{labId}` - Get lab details
-- `PUT /api/v1/labs/{labId}` - Update lab (admin)
-- `DELETE /api/v1/labs/{labId}` - Delete lab (admin)
+- `PUT /api/v1/labs/{labId}` - Update lab (its creator, if an instructor or admin; or any admin)
+- `DELETE /api/v1/labs/{labId}` - Delete lab (its creator, if an instructor or admin; or any admin)
 
 VM size is set on the lab, and every session of the lab gets it; a session request can't set
 it. Lab fields (create and update): `vm_vcpus` (1–8, default 1), `vm_memory_mib` (256–16384,
@@ -90,7 +90,7 @@ vCPUs, memory and disk. See `docs/decision.md`, "Keeping resources to a minimum"
 - `GET /api/v1/sessions` - List user sessions
 - `POST /api/v1/sessions` - Create new session
 - `GET /api/v1/sessions/{id}` - Get session details
-- `PUT /api/v1/sessions/{id}/status` - Update session status
+- `PUT /api/v1/sessions/{id}/status` - Update session status (admin)
 - `DELETE /api/v1/sessions/{id}` - End session
 
 ### Lab Sessions (VMs)
@@ -168,6 +168,37 @@ memory/storage in GiB; `kvm` is omitted when not required). Invalid quantities o
 - `GET /api/v1/admin/users` - List all users
 - `PUT /api/v1/admin/users/{id}/role` - Update user role
 - `PUT /api/v1/admin/users/{id}/status` - Update user status
+- `GET /api/v1/admin/audit-logs` - Read the audit log, newest first
+
+Audit log filters (query parameters): `user_id`, `action` (for example `users:update_role`,
+`labs:create`, `auth:login`), `resource_type`, `resource_id`, `outcome` (`attempted`, `success`,
+`denied`, `failure`), `request_id`, `ip_address`, `from` and `to` (RFC 3339), `page`, `limit` (up
+to 200, default 50). The response is `{"audit_logs": [...], "pagination": {"page", "limit",
+"total"}}`. The log is in a database of its own that the API can only add to. Entries can't be
+changed or deleted by anyone; the store removes them after its retention (30 days by default).
+Each entry has the user's ID, username and role at the time, `created_at` (when it happened) and
+`received_at` (when the store got it). The endpoint answers 503 when the read-only connection
+(`AUDIT_READ_DATABASE_URL`) isn't configured.
+
+A change has two entries with the same `request_id`: `attempted`, written before it runs, and
+the outcome. If the first can't be written, the change is refused with 503 `{"error": "The audit
+log is unavailable, so this change was refused"}`. With a spool directory (`AUDIT_SPOOL_DIR`),
+entries wait on disk while the store is unreachable and the change goes through.
+
+### Access Control
+Every route needs a permission, and each role has a fixed set (`internal/authz/authz.go`). A
+caller without the permission gets 403 with `{"error": "Insufficient privileges", "permission":
+"<name>"}`. The user's role and status are read from the database on every request, so a token
+issued before a role change or deactivation doesn't keep the old rights; a deactivated or
+deleted user gets 401.
+
+| Role | May |
+|---|---|
+| `student` | read published labs and specs; create, read and end their own sessions; their own profile and progress |
+| `instructor` | the above; create labs; update and delete their own labs; write lab specs; set session options |
+| `admin` | the above; unpublished labs; anyone's labs and sessions; `PUT /sessions/{id}/status`; the admin endpoints |
+
+See `docs/decision.md`, "Enterprise readiness".
 
 ## Redis Event Channels
 

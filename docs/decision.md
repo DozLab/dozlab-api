@@ -1118,3 +1118,160 @@ code-server runs with `--auth none`.
 In order: code-server with `--auth none` behind Traefik `forwardAuth` to a new API endpoint that
 checks the JWT and session ownership (then iframes work too); the same for the terminal route;
 `CheckOrigin` on `/api/v1/ws` limited to the CORS origins; rate limits on `/api/v1/auth/*`.
+
+---
+
+# Decision: enterprise readiness: access control, audit log, customer isolation
+
+- **Status:** access control and the audit log, in a store of its own, are built (2026-10-01).
+  Customer isolation is **not decided**: it needs the owner to choose what a "customer" is in
+  DozLab.
+- **Why now:** three questions end an enterprise deal before it starts if the answer is no, and
+  the third is hard to add later.
+
+## In short
+
+| # | The question | Before 2026-10-01 | Now | Still open |
+|---|---|---|---|---|
+| 1 | **Access control:** permissions by role, by action, by data type, scoped by team | three roles, with `if role != "admin"` spread over the handlers; students could edit lab specs and set any session's status | one table of which role has which permission (`internal/authz`), named on every route; a role or status change applies to the next request | scoping by team or organisation: there is no team in the schema |
+| 2 | **Audit log:** who did what, from where, when; immutable, queryable, separate from app data | an `audit_logs` table nothing wrote to | a database of its own that the API can only add to; every change, every refused or failed request and the sensitive reads are recorded; nobody can change or delete an entry; a change that can't be recorded is refused; kept 30 days; admins can query it | it can share a server with the app database unless deployed apart; 30 days is short for an audit; no export |
+| 3 | **Customer isolation:** one customer's data kept apart from another's, in the architecture | none in the data: no tenant in the schema, one Kubernetes namespace for every session. Compute is isolated: each lab is its own Firecracker microVM | unchanged | everything; see [Customer isolation](#customer-isolation-not-decided) |
+
+## Access control (built)
+
+- **One table.** `internal/authz/authz.go` lists the permissions (`<data type>:<action>`, for
+  example `labs:create`, `sessions:set_options`, `users:update_role`, `audit:read`) and which
+  role has which. Nothing else compares role names.
+- **On every route.** `internal/api/routes.go` names the permission each route needs
+  (`middleware.RequirePermission`). A caller without it gets 403, and the refusal is in the
+  audit log with the permission's name.
+- **Own records and any record.** `labs:update`, `labs:delete`, `sessions:read` and
+  `sessions:delete` cover the caller's own records. `labs:manage_any` and
+  `sessions:manage_any` (admins) lift that.
+- **Current role, not the token's.** The role in a token is as old as the token (up to an hour,
+  or seven days through a refresh). `middleware.CurrentUser` reads the user's role and status
+  from the database on every request, so a demoted, deactivated or deleted user loses access at
+  once. It costs one small query per request.
+
+| Role | Has |
+|---|---|
+| `student` | read published labs and their specs; create, read and end their own sessions; their own profile and progress |
+| `instructor` | the above, plus create labs, update and delete their own labs, write lab specs, set session options |
+| `admin` | the above, plus read unpublished labs, manage anyone's labs and sessions, list users, change roles and statuses, read the audit log |
+
+An unknown or missing role has no permissions.
+
+**Holes this closed** (found while moving the checks into the table):
+
+- Any logged-in user could create, change or delete a lab's specs. Now `lab_specs:write`.
+- Any logged-in user could set the status of any session (`PUT /sessions/{id}/status`). Now
+  admins only.
+
+**Not built:** scoping by team or organisation, permissions per lab (for example "instructor of
+this course only"), and custom roles. `lab_specs:write` isn't limited to the instructor's own
+labs yet.
+
+## Audit log (built)
+
+The application isn't live, so the log was put in a store of its own from the start rather
+than moved there later (owner decision, 2026-10-01): entries written to the app's database
+would never have been under the stronger guarantee.
+
+**A separate store with its own credentials.** The audit log is a PostgreSQL database apart
+from the app's (`internal/database/audit_migrations`). The app's database has no audit table:
+migration 004 drops the one from 001.
+
+**The API can only add.** Three kinds of access to the store:
+
+| Who | May | May not |
+|---|---|---|
+| the API's writer login (`AUDIT_DATABASE_URL`, role `dozlab_audit_writer`) | add entries; ask the store to run its purge | read, change or delete an entry; alter the table or its triggers; change the retention; set the time the store received an entry |
+| the reader login (`AUDIT_READ_DATABASE_URL`, role `dozlab_audit_reader`), used only by `GET /api/v1/admin/audit-logs` | read entries | add, change or delete one; run the purge |
+| the store's owner, never used by the API | apply migrations; set the retention | change or delete an entry: the triggers refuse `UPDATE`, `DELETE` and `TRUNCATE` for everyone |
+
+**No links to app data.** An entry has no foreign key and carries what it needs: user ID,
+username and role at the time, the action (the permission used, or `auth:login`), the data
+type and record ID, the outcome, method, path, status, IP address and user agent. Role and
+status changes keep the old and new values. It stays readable after the user or the record is
+deleted. `created_at` is when it happened, as the API reports it; `received_at` is when the
+store got it, which the API can't set, so a late or backdated entry shows.
+
+**Its own lifecycle.** The retention is a setting in the store (`audit_settings.retention_days`,
+30 by default, owner decision 2026-10-01), not in the API's configuration. Only the store's
+owner changes it; it can't go below 30 days, and 0 keeps entries for ever. The store's
+`audit_purge()` removes what is older and records that it did. The API asks for it once a day
+and can't influence what it removes.
+
+**What is recorded.** Every request that changes something, every request that was refused
+(401, 403) or failed, and reads of other people's data (the user list, the log itself).
+`AUDIT_READS=true` also records every successful read. Request bodies and query strings are
+never recorded, so no passwords or tokens.
+
+**A change that can't be recorded is refused** (owner decision, 2026-10-01). Before a change
+runs, an `attempted` entry is written; if that fails the request gets 503 and nothing
+happens. The entry with the outcome follows, with the same `request_id`. Reads are never
+refused. `AUDIT_REQUIRED=false` turns this off.
+
+**The store's outage doesn't stop the API.** With "refuse if it can't be recorded", the store
+would be a second thing whose outage stops every change. So entries the store doesn't take go
+to a local durable spool (`AUDIT_SPOOL_DIR`): one file per entry, synced to disk, and counted
+as recorded. They are delivered, oldest first, when the store answers again. A change is
+refused only when neither the store nor the spool can be written.
+
+**Queryable.** `GET /api/v1/admin/audit-logs` (permission `audit:read`), filtered by user,
+action, data type, record, outcome, request, IP address and time range, newest first.
+
+**What it doesn't meet yet:**
+
+- **Separate server and separate people.** The code and the logins are separate, but nothing
+  stops the audit database being created on the app's PostgreSQL server, where that server's
+  superuser controls both. For the full answer, run it on a separate server or account,
+  administered by different people, with its own backups.
+- **The store's owner can still drop the triggers or the table.** Stronger is an external
+  append-only store (object storage with object lock, or a managed log service).
+  `audit.Recorder` is the interface a second implementation would satisfy.
+- **The spool is on the API's host.** Entries waiting there haven't reached the store yet and
+  could be removed by whoever controls that host. It must be on a volume that survives a
+  restart.
+- **30 days is short for an audit.** SOC 2 auditors usually look at a period of months, and a
+  year is common. Raise `retention_days` in the store, or archive, before an audit. There is
+  no archive or export yet.
+- **The `attempted` entry has no user.** It is written before the token is checked. The
+  outcome entry has the user; if that write is lost, the change is on record without a name.
+- **Actions outside the API.** Changes made straight in the database or the cluster, and what
+  a student does inside a lab VM, aren't in this log.
+
+## Customer isolation (not decided)
+
+Today there is one set of tables for everyone and no notion of a customer. Rows are kept apart
+only by the per-user checks above. What a "customer" is has to be decided first (a company, a
+school, a course), then how far apart customers are kept:
+
+| | A. Organisation column, enforced by the database | B. A schema or database per customer | C. A cluster per customer |
+|---|---|---|---|
+| How | every table gets `organization_id`; PostgreSQL row-level security filters every query by it | each customer's tables are separate; the API picks the schema or database per request | a full deployment per customer |
+| Isolation | strong if every table has the policy; one missed table leaks | stronger and easier to show an auditor | strongest |
+| Cost to run | one database, one migration run | a migration run per customer; more connections | highest by far |
+| Fits | many small customers | fewer, larger customers; data-residency asks | regulated or very large customers |
+
+**Recommendation:** A, with a Kubernetes namespace per organisation for lab sessions, plus
+resource quotas and network policies on each namespace. Offer C to a customer who asks for it.
+It is the cheapest to add while the schema is small, and it is the base that team-scoped
+permissions (question 1) and an organisation on every audit entry (question 2) build on.
+
+**Network isolation between lab pods.** Flannel on its own doesn't enforce Kubernetes network
+policies. The local cluster is k3s, which runs its own network policy controller beside
+Flannel unless started with `--disable-network-policy`; on 2026-10-01 that flag wasn't set and
+the cluster had no policies, so every lab pod can reach every other. Enforcement hasn't been
+tested. A production cluster that isn't k3s needs a CNI that enforces policies (Calico,
+Cilium, or Canal to keep Flannel).
+
+## Still to decide
+
+1. What a customer is, and option A, B or C.
+2. Whether the audit store runs on a separate server with separate administrators, whether to
+   add an external append-only store, and whether entries are archived before the 30-day
+   purge. Decided on 2026-10-01: a separate database the API can only add to, kept 30 days by
+   default, and a change that can't be recorded is refused.
+3. Whether instructors may write specs only for their own labs.
+4. Whether to test and add network policies on the local cluster.

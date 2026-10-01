@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"dozlab-backend/internal/audit"
+	"dozlab-backend/internal/authz"
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
 
@@ -56,7 +58,7 @@ type CreateLabSessionRequest struct {
 }
 
 // sessionOptions returns the names of the session options the request sets. Only instructors
-// and admins may set them (canManageLabs). The VS Code password is the caller's own credential
+// and admins may set them (authz.SessionsSetOptions). The VS Code password is the caller's own credential
 // and not an option, so anyone may choose it (owner decision, 2026-10-01).
 func (r CreateLabSessionRequest) sessionOptions() []string {
 	var set []string
@@ -107,7 +109,8 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 	}
 
 	// Students can't set session options: they get the defaults (a non-persistent session)
-	if options := req.sessionOptions(); len(options) > 0 && !canManageLabs(c) {
+	if options := req.sessionOptions(); len(options) > 0 && !can(c, authz.SessionsSetOptions) {
+		audit.SetMeta(c, "refused_options", options)
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":   "Only instructors and admins can set session options",
 			"options": options,
@@ -131,8 +134,7 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 	}
 
 	// Check if lab is published for non-admin users
-	userRole, _ := c.Get("role")
-	if userRole != "admin" && !lab.IsPublished {
+	if !can(c, authz.LabsReadUnpublished) && !lab.IsPublished {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": "Lab is not published",
 		})
@@ -164,6 +166,11 @@ func (h *LabSessionHandler) CreateLabSession(c *gin.Context) {
 			"error": "Failed to create session record",
 		})
 		return
+	}
+	audit.SetResource(c, "sessions", sessionID.String())
+	audit.SetMeta(c, "lab_id", req.LabID.String())
+	if options := req.sessionOptions(); len(options) > 0 {
+		audit.SetMeta(c, "options", options)
 	}
 
 	// Set default values
@@ -266,8 +273,7 @@ func (h *LabSessionHandler) GetLabSession(c *gin.Context) {
 	query := h.db.DB.Preload("Lab").Preload("User")
 
 	// Non-admin users can only access their own sessions
-	userRole, _ := c.Get("role")
-	if userRole != "admin" {
+	if !can(c, authz.SessionsManageAny) {
 		query = query.Where("user_id = ?", userID)
 	}
 
@@ -325,8 +331,7 @@ func (h *LabSessionHandler) ListLabSessions(c *gin.Context) {
 	query := h.db.DB.Preload("Lab").Preload("User")
 
 	// Non-admin users can only see their own sessions
-	userRole, _ := c.Get("role")
-	if userRole != "admin" {
+	if !can(c, authz.SessionsManageAny) {
 		query = query.Where("user_id = ?", userID)
 	}
 
@@ -389,8 +394,7 @@ func (h *LabSessionHandler) DeleteLabSession(c *gin.Context) {
 	query := h.db.DB
 
 	// Non-admin users can only delete their own sessions
-	userRole, _ := c.Get("role")
-	if userRole != "admin" {
+	if !can(c, authz.SessionsManageAny) {
 		query = query.Where("user_id = ?", userID)
 	}
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"dozlab-backend/internal/api"
+	"dozlab-backend/internal/audit"
 	"dozlab-backend/internal/config"
 	"dozlab-backend/internal/container"
 	"dozlab-backend/internal/database"
@@ -65,9 +66,21 @@ func run() error {
 		return fmt.Errorf("start event consumers: %w", err)
 	}
 
+	// The audit log has a database of its own, which the API can only add to
+	auditStore, err := audit.Open(audit.Config{
+		WriterURL: os.Getenv("AUDIT_DATABASE_URL"),
+		ReaderURL: os.Getenv("AUDIT_READ_DATABASE_URL"),
+		SpoolDir:  os.Getenv("AUDIT_SPOOL_DIR"),
+		Required:  os.Getenv("AUDIT_REQUIRED") != "false",
+	})
+	if err != nil {
+		return err
+	}
+	defer auditStore.Close()
+
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery(), middleware.CORS(cfg.CORSAllowedOrigins))
-	api.SetupRoutes(router, db, c.EventBus, c.WSManager)
+	api.SetupRoutes(router, db, c.EventBus, c.WSManager, auditStore)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
@@ -77,6 +90,9 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Forward spooled audit entries, and have the store apply its retention once a day
+	auditStore.Start(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {

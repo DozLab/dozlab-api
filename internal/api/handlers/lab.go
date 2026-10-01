@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"dozlab-backend/internal/audit"
+	"dozlab-backend/internal/authz"
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
 	"dozlab-backend/internal/services"
@@ -70,7 +72,7 @@ func (h *LabHandler) CreateLab(c *gin.Context) {
 	}
 
 	// Only instructors and admins create labs (docs/decision.md, owner decision 2026-09-30)
-	if !canManageLabs(c) {
+	if !can(c, authz.LabsCreate) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": "Only instructors and admins can create labs",
 		})
@@ -96,6 +98,9 @@ func (h *LabHandler) CreateLab(c *gin.Context) {
 		})
 		return
 	}
+
+	audit.SetResource(c, "labs", lab.ID.String())
+	audit.Annotate(c).New = map[string]interface{}{"name": lab.Name, "slug": lab.Slug}
 
 	// Load the creator relationship
 	h.db.DB.Preload("Creator").First(&lab, lab.ID)
@@ -131,8 +136,7 @@ func (h *LabHandler) GetLab(c *gin.Context) {
 	}
 
 	// Check if user can access this lab
-	userRole, _ := c.Get("role")
-	if userRole != "admin" && !lab.IsPublished {
+	if !can(c, authz.LabsReadUnpublished) && !lab.IsPublished {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": "Lab is not published",
 		})
@@ -162,8 +166,6 @@ func (h *LabHandler) UpdateLab(c *gin.Context) {
 		return
 	}
 
-	userRole, _ := c.Get("role")
-
 	var lab models.Lab
 	if err := h.db.DB.First(&lab, "id = ?", labID).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -179,7 +181,7 @@ func (h *LabHandler) UpdateLab(c *gin.Context) {
 	}
 
 	// Check if user can update this lab
-	if userRole != "admin" && (lab.CreatedBy == nil || *lab.CreatedBy != userID.(uuid.UUID)) {
+	if !can(c, authz.LabsManageAny) && (lab.CreatedBy == nil || *lab.CreatedBy != userID.(uuid.UUID)) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": "You don't have permission to update this lab",
 		})
@@ -278,8 +280,6 @@ func (h *LabHandler) DeleteLab(c *gin.Context) {
 		return
 	}
 
-	userRole, _ := c.Get("role")
-
 	var lab models.Lab
 	if err := h.db.DB.First(&lab, "id = ?", labID).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -295,7 +295,7 @@ func (h *LabHandler) DeleteLab(c *gin.Context) {
 	}
 
 	// Check if user can delete this lab
-	if userRole != "admin" && (lab.CreatedBy == nil || *lab.CreatedBy != userID.(uuid.UUID)) {
+	if !can(c, authz.LabsManageAny) && (lab.CreatedBy == nil || *lab.CreatedBy != userID.(uuid.UUID)) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": "You don't have permission to delete this lab",
 		})
@@ -545,8 +545,7 @@ func (h *LabHandler) GetSessions(c *gin.Context) {
 	query := h.db.DB.Preload("Lab").Preload("User")
 
 	// Non-admin users can only see their own sessions
-	userRole, _ := c.Get("role")
-	if userRole != "admin" {
+	if !can(c, authz.SessionsManageAny) {
 		query = query.Where("user_id = ?", userID)
 	}
 
@@ -628,8 +627,7 @@ func (h *LabHandler) GetSession(c *gin.Context) {
 	query := h.db.DB.Preload("Lab").Preload("User")
 
 	// Non-admin users can only access their own sessions
-	userRole, _ := c.Get("role")
-	if userRole != "admin" {
+	if !can(c, authz.SessionsManageAny) {
 		query = query.Where("user_id = ?", userID)
 	}
 
@@ -704,11 +702,10 @@ func (h *LabHandler) DeleteSession(c *gin.Context) {
 		return
 	}
 
-	userRole, _ := c.Get("role")
 	query := h.db.DB
 
 	// Non-admin users can only delete their own sessions
-	if userRole != "admin" {
+	if !can(c, authz.SessionsManageAny) {
 		query = query.Where("user_id = ?", userID)
 	}
 

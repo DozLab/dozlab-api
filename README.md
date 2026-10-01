@@ -119,6 +119,9 @@ export JWT_SECRET=change-me-to-a-long-random-secret
 export DB_HOST=localhost DB_NAME=dozlab DB_USER=postgres DB_PASSWORD=password
 export REDIS_HOST=localhost
 export RABBITMQ_URL=amqp://guest:guest@localhost:5672/
+# The audit log needs a database of its own ("Access control and audit log" below). To try the
+# API without one, entries can go to the server log instead:
+export AUDIT_REQUIRED=false
 go run ./cmd/api
 
 # Or build a binary
@@ -273,7 +276,50 @@ VSCODE_IMAGE=codercom/code-server:latest
 
 # Network Configuration
 ALLOWED_ORIGINS=http://localhost:3000,https://yourdomain.com
+
+# Audit store: a database of its own. The API writes with a login that may only add entries
+AUDIT_DATABASE_URL=postgres://dozlab_api_audit:...@audit-db:5432/dozlab_audit
+# ... and the admin endpoint reads with one that may only read. Unset: the endpoint is off
+AUDIT_READ_DATABASE_URL=postgres://dozlab_audit_admin:...@audit-db:5432/dozlab_audit
+# Where entries wait while the store is unreachable; must survive a restart. Unset: a change
+# is refused while the store is down
+AUDIT_SPOOL_DIR=/var/lib/dozlab/audit-spool
+# Refuse a change (503) when it can't be recorded. false: only log the failed write, and run
+# without AUDIT_DATABASE_URL (entries go to the server log)
+AUDIT_REQUIRED=true
+# Also record every successful read (default: changes, refused and failed requests, and
+# sensitive reads only)
+AUDIT_READS=false
 ```
+
+### Access control and audit log
+
+- **Access control:** `internal/authz/authz.go` is the one table of which role has which
+  permission, and `internal/api/routes.go` names the permission each route needs.
+- **Audit log:** `internal/audit` records who did what, to which record, from where and when,
+  in a database apart from the app's. The app's database has no audit table (migration 004).
+
+Setting up the audit store, as a PostgreSQL superuser and then as the store's owner:
+
+```bash
+# 1. A database with its own owner (ideally on its own server)
+psql -c "CREATE ROLE dozlab_audit_owner LOGIN CREATEROLE PASSWORD '...'" \
+     -c "CREATE DATABASE dozlab_audit OWNER dozlab_audit_owner"
+# 2. The table, the append-only triggers, the retention and the two roles, as the owner
+psql -U dozlab_audit_owner -d dozlab_audit -f internal/database/audit_migrations/001_audit_store.up.sql
+# 3. One login that may only add entries (the API) and one that may only read them
+psql -c "CREATE ROLE dozlab_api_audit LOGIN PASSWORD '...' IN ROLE dozlab_audit_writer" \
+     -c "CREATE ROLE dozlab_audit_admin LOGIN PASSWORD '...' IN ROLE dozlab_audit_reader"
+```
+
+Entries are kept 30 days. The store's owner changes that, the API can't:
+`UPDATE audit_settings SET retention_days = 365;` (at least 30, or 0 to keep them for ever).
+
+The store's rules are grants, triggers and a function, so their test needs a real PostgreSQL
+with the three logins: `AUDIT_TEST_WRITER_URL=... AUDIT_TEST_READER_URL=... AUDIT_TEST_OWNER_URL=...
+go test ./internal/audit/`. `scripts/e2e-timing.sh up` sets the store up for local runs.
+
+See `docs/decision.md`, "Enterprise readiness", for what is and isn't covered.
 
 ## 🧪 Testing
 

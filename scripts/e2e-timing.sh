@@ -55,6 +55,10 @@ up() {
       echo "E2E_PASSWORD=$(openssl rand -hex 12)"; } > "$STATE/env"
     chmod 600 "$STATE/env"
   fi
+  # The audit store's three logins (added later than the others, so an older env file gets them)
+  grep -q '^AUDIT_OWNER_PASSWORD=' "$STATE/env" ||
+    { echo "AUDIT_OWNER_PASSWORD=$(openssl rand -hex 16)"; echo "AUDIT_WRITER_PASSWORD=$(openssl rand -hex 16)"
+      echo "AUDIT_READER_PASSWORD=$(openssl rand -hex 16)"; } >> "$STATE/env"
   load_env
   local t
 
@@ -69,7 +73,23 @@ up() {
   for f in "$REPO"/internal/database/migrations/*.up.sql; do
     docker exec -i dozlab-e2e-pg psql -q -v ON_ERROR_STOP=1 -U postgres -d dozlab < "$f" >/dev/null
   done
-  record "up: postgres + redis + schema" "$t" "$(now)" ok
+  # The audit store: a database of its own with its own owner, and one login that may only add
+  # entries (the API writes with it) and one that may only read them. Same server here; in
+  # production it should be a separate one.
+  local pg="docker exec -i dozlab-e2e-pg psql -q -v ON_ERROR_STOP=1 -U postgres"
+  $pg -d postgres >/dev/null <<SQL
+CREATE ROLE dozlab_audit_owner LOGIN CREATEROLE PASSWORD '$AUDIT_OWNER_PASSWORD';
+CREATE DATABASE dozlab_audit OWNER dozlab_audit_owner;
+SQL
+  for f in "$REPO"/internal/database/audit_migrations/*.up.sql; do
+    docker exec -i -e PGPASSWORD="$AUDIT_OWNER_PASSWORD" dozlab-e2e-pg \
+      psql -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U dozlab_audit_owner -d dozlab_audit < "$f" >/dev/null
+  done
+  $pg -d postgres >/dev/null <<SQL
+CREATE ROLE dozlab_api_audit LOGIN PASSWORD '$AUDIT_WRITER_PASSWORD' IN ROLE dozlab_audit_writer;
+CREATE ROLE dozlab_audit_admin LOGIN PASSWORD '$AUDIT_READER_PASSWORD' IN ROLE dozlab_audit_reader;
+SQL
+  record "up: postgres + redis + schema + audit store" "$t" "$(now)" ok
 
   say "RabbitMQ port-forward (cluster, namespace dozlab)"; t=$(now)
   alive portforward && kill "$(cat "$STATE/portforward.pid")" || true
@@ -88,6 +108,9 @@ up() {
     DB_HOST=127.0.0.1 DB_PORT=$PG_PORT DB_NAME=dozlab DB_USER=postgres DB_PASSWORD="$PG_PASSWORD" \
     REDIS_HOST=127.0.0.1 REDIS_PORT=$REDIS_PORT \
     RABBITMQ_URL="amqp://$ru:$rp@127.0.0.1:$RABBIT_PORT/" \
+    AUDIT_DATABASE_URL="postgres://dozlab_api_audit:$AUDIT_WRITER_PASSWORD@127.0.0.1:$PG_PORT/dozlab_audit?sslmode=disable" \
+    AUDIT_READ_DATABASE_URL="postgres://dozlab_audit_admin:$AUDIT_READER_PASSWORD@127.0.0.1:$PG_PORT/dozlab_audit?sslmode=disable" \
+    AUDIT_SPOOL_DIR="$STATE/audit-spool" \
     nohup "$STATE/api" > "$STATE/api.log" 2>&1 &
   echo $! > "$STATE/api.pid"
   for _ in $(seq 120); do curl -fsS "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1 && break
