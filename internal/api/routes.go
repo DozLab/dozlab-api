@@ -132,6 +132,8 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 				// Own labs; labs:manage_any (admins) lifts that in the handler
 				labs.PUT("/:labId", require(authz.LabsUpdate), labHandler.UpdateLab)
 				labs.DELETE("/:labId", require(authz.LabsDelete), labHandler.DeleteLab)
+				// What a VM of the lab reserves and stores, shown before the VM is created
+				labs.GET("/:labId/estimate", require(authz.LabsEstimate), labHandler.GetLabEstimate)
 				
 				// Lab specifications routes with composite key support
 				labs.GET("/:labId/specs", require(authz.LabSpecsRead), labHandler.GetLabSpecs)

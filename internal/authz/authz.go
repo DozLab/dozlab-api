@@ -27,6 +27,7 @@ const (
 	LabsUpdate          Permission = "labs:update" // own labs
 	LabsDelete          Permission = "labs:delete" // own labs
 	LabsManageAny       Permission = "labs:manage_any"
+	LabsEstimate        Permission = "labs:estimate" // what a VM of the lab reserves and stores
 
 	LabSpecsRead  Permission = "lab_specs:read"
 	LabSpecsWrite Permission = "lab_specs:write"
@@ -63,7 +64,7 @@ var everyone = []Permission{
 // What an instructor may do on top of that: create labs and manage their own, and set
 // session options (docs/decision.md, "What phase 1 needs in the API").
 var instructorOnly = []Permission{
-	LabsCreate, LabsUpdate, LabsDelete, LabSpecsWrite, SessionsSetOptions,
+	LabsCreate, LabsUpdate, LabsDelete, LabsEstimate, LabSpecsWrite, SessionsSetOptions,
 }
 
 // What only an admin may do: act on other people's records, manage users, read the audit log.

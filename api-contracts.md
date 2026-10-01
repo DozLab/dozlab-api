@@ -73,6 +73,41 @@ DozLab implements **Kubernetes sidecar architecture** with:
 - `PUT /api/v1/labs/{labId}` - Update lab (its creator, if an instructor or admin; or any admin)
 - `DELETE /api/v1/labs/{labId}` - Delete lab (its creator, if an instructor or admin; or any admin)
 
+- `GET /api/v1/labs/{labId}/estimate` - What one VM of the lab reserves and stores (instructor, admin)
+
+The estimate is for showing an instructor what a VM takes before it is created. CPU is in
+thousandths of a core and memory and storage in MiB:
+
+```json
+{
+  "lab_id": "...",
+  "estimate": {
+    "persistence": "none",
+    "vm": {"vcpus": 1, "memory_mib": 512, "disk_gib": 1},
+    "containers": [
+      {"name": "firecracker-vm", "purpose": "runs the VM",
+       "reserved": {"cpu_millicores": 100, "memory_mib": 640},
+       "maximum": {"cpu_millicores": 1000, "memory_mib": 640}},
+      {"name": "terminal-sidecar", "...": "..."},
+      {"name": "code-server", "...": "..."}
+    ],
+    "total": {"reserved": {"cpu_millicores": 850, "memory_mib": 1920},
+              "maximum": {"cpu_millicores": 2500, "memory_mib": 3200}},
+    "devices": {"dozlab.io/kvm": 1, "dozlab.io/tun": 1},
+    "storage": {
+      "while_running": [{"name": "vm-kernels", "purpose": "the VM's disk", "kind": "node-local", "size_mib": 2048}, "..."],
+      "volumes_mib": 6144,
+      "node_local_limit_mib": 2058,
+      "after_stop_mib": 0
+    }
+  }
+}
+```
+
+`reserved` is what the cluster sets aside (it limits how many VMs fit on a node); `maximum` is
+the most the VM may use. `persistence` (query parameter) accepts only `none` today. The numbers
+mirror dozlab-controller (`internal/estimate`).
+
 VM size is set on the lab, and every session of the lab gets it; a session request can't set
 it. Lab fields (create and update): `vm_vcpus` (1–8, default 1), `vm_memory_mib` (256–16384,
 default 512) and `vm_disk_gib` (1–100, default 1). The API passes them to the LabSession as

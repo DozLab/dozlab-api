@@ -595,6 +595,11 @@ controller's defaults on `main` (`internal/controller/resource_builder.go`,
 the lab's actual values. They're listed as resources rather than money so a price per unit can
 be attached later.
 
+> **Update, 2026-10-01:** the table below predates dozlab-controller #13, which sizes the VM
+> container from the lab (it now reserves the VM's memory plus 128 MiB and 100m CPU, not 3 Gi
+> and 1 CPU). The current numbers for a lab come from `GET /api/v1/labs/{labId}/estimate`
+> (`internal/estimate`), which mirrors the controller.
+
 **While a VM is running, every option uses the same CPU and memory.** Each VM is one pod with
 three containers:
 
