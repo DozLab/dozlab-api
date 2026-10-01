@@ -94,9 +94,76 @@ new WebSocket(`wss://api.example/api/v1/ws?token=${accessToken}`);
 
 # Decision: who creates the per-session writable disk
 
-- **Status:** accepted (2026-09-30), to be reviewed once built (see [Time](#time))
+- **Status:** accepted (2026-09-30). Partly built and **moved to the backlog (2026-10-01)**; see
+  [Why a writable disk, and where it stands](#why-a-writable-disk-and-where-it-stands-2026-10-01)
 - **Decision:** option A, the init container (`dozlab-rootfs-manager/init-setup/init.sh`).
   A and B are expected to save the same time, so `init.sh` wins on keeping disk setup in one place.
+
+## Why a writable disk, and where it stands (2026-10-01)
+
+**The goal:** let a student stop a VM and come back to their files, use less disk per session,
+and start each VM faster.
+
+**Why it needs a writable disk:** every session boots from one shared base image that nothing
+writes to. A VM still has to write somewhere (its SSH key, hostname, logs, the student's
+files), so each session gets a small disk of its own for that. Inside the VM the two are
+layered, and the student sees one normal disk.
+
+**What it's for, in order of importance:**
+
+1. **Persistence** (owner request, 2026-09-30). A session's changes live in one small file,
+   separate from the base. Keep the file on a volume and the student gets their files back; throw
+   it away and the session is disposable, as today. The `none` / `files` option in
+   [Session options for end users](#session-options-for-end-users) depends on this.
+2. **Less disk per session.** A session stores what it changed, not a whole copy of the image.
+3. **Startup time.** No check and grow step, and no copy once pods share the base.
+
+**What is built** (dozlab-rootfs-manager #11, dozlab-infra #13; both do nothing unless
+`WRITABLE_DISK_PATH` is set):
+
+- `init.sh` creates the writable disk with the cloud-init seed on it, and keeps a disk that is
+  already there.
+- `overlay-init` in the vm lab layers the disk over the read-only base.
+- `start-firecracker.sh` attaches the base read-only and the writable disk as a second drive.
+
+**Measured** (2026-10-01, Docker, 2 vCPUs, 2048 MiB, 4 GB writable disk):
+
+| | Single disk (today) | Read-only base + writable disk |
+|---|---|---|
+| vm lab, init container | 4.6 s | 3.4 s |
+| vm lab, container start → SSH | 5.0 s | 5.3 s |
+| vm lab, restart on the same volume | – | init container 0.65 s; files and SSH host key kept |
+| k8s lab, init container | 12.6 s (2026-09-30) | 10.0 s |
+| k8s lab, container start → SSH | – | 5.1 s, but `kubeadm init` fails (below) |
+
+The base file's SHA-256 was the same before and after a session, and a write to the base from
+inside the VM was refused.
+
+**What this shows:**
+
+- **Persistence works** for the vm lab: a restart keeps the files, and cloud-init treats it as a
+  reboot.
+- **The time saving is small so far** (about 1.2 s for the vm lab). Each pod still copies the
+  base into its own volume, and that copy is most of the init container's time. The larger
+  saving needs [the base shared between pods](#separate-decision-sharing-the-base), which isn't
+  built.
+- **On speed alone this isn't worth it yet.** It is worth it as the base for persistence.
+
+**Known gap, the k8s lab:** it boots on the layered root, but `kubeadm init` fails because
+containerd can't extract image layers. `/var/lib/containerd` is on the layered root, and
+containerd's overlayfs storage can't sit on top of another overlay, which is the likely cause
+(the log line was cut off before the reason). Its storage has to be directly on the writable
+disk. Which part sets that up is not decided: `overlay-init` (one place, before systemd starts)
+or a systemd mount unit in the k8s lab image.
+
+**Moved to the backlog (owner decision, 2026-10-01).** Not being worked on now. To pick it up
+again, in this order:
+
+1. Decide and build the containerd storage for the k8s lab.
+2. Controller: pass `WRITABLE_DISK_PATH` and `WRITABLE_DISK_SIZE` to the pod's containers.
+3. Measure again on the cluster for both labs, with and without a shared base (see
+   [Time](#time)).
+4. The `persistence` option in the API and the controller.
 
 ## In short
 
