@@ -447,6 +447,8 @@ type K8sSessionStatus struct {
 	VMIP      string                 `json:"vm_ip,omitempty"`
 	Endpoints map[string]string      `json:"endpoints,omitempty"`
 	Conditions []K8sCondition        `json:"conditions,omitempty"`
+	// Usage is what the VM holds in the cluster; nil until the controller has reported it
+	Usage *VMUsage `json:"usage,omitempty"`
 }
 
 type K8sCondition struct {
@@ -491,7 +493,9 @@ func convertK8sStatus(k8sSession *unstructured.Unstructured) *K8sSessionStatus {
 			}
 		}
 	}
-	
+
+	status.Usage = usageFromStatus(k8sSession)
+
 	return status
 }
 

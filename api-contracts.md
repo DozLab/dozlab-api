@@ -131,8 +131,32 @@ vCPUs, memory and disk. See `docs/decision.md`, "Keeping resources to a minimum"
 ### Lab Sessions (VMs)
 - `POST /api/v1/lab-sessions` - Start a session of a lab (`lab_id`)
 - `GET /api/v1/lab-sessions` - List the caller's sessions
-- `GET /api/v1/lab-sessions/{id}` - Session details and cluster status
+- `GET /api/v1/lab-sessions/{id}` - Session details and cluster status, including `k8s_status.usage`
+- `GET /api/v1/lab-sessions/usage` - What the caller's VMs hold in the cluster, per VM and per lab (instructor, admin)
 - `DELETE /api/v1/lab-sessions/{id}` - End a session
+
+Usage is what a VM holds in the cluster, as dozlab-controller reports it in the LabSession's
+`status.usage`: CPU in thousandths of a core, memory and storage in MiB. They are the amounts
+set aside for the VM, not what it consumes. A VM holds its CPU and memory while `running` is
+true, and its storage until the session is deleted. `usage` is absent (`null` in the report)
+until the controller has reported it.
+
+```json
+{
+  "labs": [
+    {"lab_id": "...", "lab_name": "Docker basics",
+     "vms": [
+       {"session_id": "...", "user_id": "...", "status": "running", "phase": "Running", "created_at": "...",
+        "usage": {"running": true, "cpu_millicores": 850, "memory_mib": 1920, "storage_mib": 6144}}
+     ],
+     "total": {"vms": 2, "running_vms": 1, "cpu_millicores": 850, "memory_mib": 1920, "storage_mib": 12288}}
+  ],
+  "total": {"vms": 3, "running_vms": 1, "cpu_millicores": 850, "memory_mib": 1920, "storage_mib": 12288}
+}
+```
+
+The report covers the caller's own VMs, grouped by lab; an admin gets everyone's. Totals count
+CPU and memory for running VMs only, and storage for all of them.
 
 Session options are for instructors and admins. A student who sends `timeout` or any of
 `config.enable_terminal`, `config.enable_vscode`, `config.enable_ssh` gets 403, with the option

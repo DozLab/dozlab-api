@@ -37,6 +37,7 @@ const (
 	SessionsRead       Permission = "sessions:read"   // own sessions
 	SessionsDelete     Permission = "sessions:delete" // own sessions
 	SessionsManageAny  Permission = "sessions:manage_any"
+	SessionsUsage      Permission = "sessions:usage" // what one's VMs hold, per VM and per lab
 
 	ProfileRead   Permission = "profile:read"
 	ProfileUpdate Permission = "profile:update"
@@ -65,6 +66,7 @@ var everyone = []Permission{
 // session options (docs/decision.md, "What phase 1 needs in the API").
 var instructorOnly = []Permission{
 	LabsCreate, LabsUpdate, LabsDelete, LabsEstimate, LabSpecsWrite, SessionsSetOptions,
+	SessionsUsage,
 }
 
 // What only an admin may do: act on other people's records, manage users, read the audit log.

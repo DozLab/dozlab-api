@@ -161,6 +161,8 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 					// sessions:set_options is checked in the handler, when a request sets one
 					labSessions.POST("/", require(authz.SessionsCreate), labSessionHandler.CreateLabSession)
 					labSessions.GET("/", require(authz.SessionsRead), labSessionHandler.ListLabSessions)
+					// What the caller's VMs hold, per VM and summed per lab
+					labSessions.GET("/usage", require(authz.SessionsUsage), labSessionHandler.GetUsage)
 					labSessions.GET("/:id", require(authz.SessionsRead), labSessionHandler.GetLabSession)
 					labSessions.DELETE("/:id", require(authz.SessionsDelete), labSessionHandler.DeleteLabSession)
 				}
