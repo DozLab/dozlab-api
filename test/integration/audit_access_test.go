@@ -122,7 +122,7 @@ func TestAccessControl_PermissionPerRole(t *testing.T) {
 		{"delete a lab", "DELETE", "/api/v1/labs/" + someID, "", 403, 404, 404},
 		{"estimate a lab's VM", "GET", "/api/v1/labs/" + someID + "/estimate", "", 403, 404, 404},
 		{"read lab specs", "GET", "/api/v1/labs/" + someID + "/specs", "", 200, 200, 200},
-		{"create a lab spec", "POST", "/api/v1/labs/" + someID + "/specs", `{}`, 403, 400, 400},
+		{"create a lab spec", "POST", "/api/v1/labs/" + someID + "/specs", `{}`, 403, 404, 404},
 		{"delete a lab spec", "DELETE", "/api/v1/labs/" + someID + "/specs/1", "", 403, 404, 404},
 		{"set any session's status", "PUT", "/api/v1/sessions/" + someID + "/status", `{"status":"completed"}`, 403, 403, 200},
 		{"list own sessions", "GET", "/api/v1/sessions/", "", 200, 200, 200},
