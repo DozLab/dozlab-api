@@ -87,9 +87,13 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 	// API v1 routes
 	v1 := router.Group("/api/v1")
 	// Audit log: every change, every refused or failed request, and the sensitive reads. It is
-	// first so that requests refused for a bad token are recorded too. AUDIT_READS=true also
-	// records every successful read.
-	v1.Use(audit.Middleware(audit.NewDBRecorder(db), audit.Options{Reads: os.Getenv("AUDIT_READS") == "true"}))
+	// first so that requests refused for a bad token are recorded too. A change that can't be
+	// recorded is refused (503) unless AUDIT_REQUIRED=false. AUDIT_READS=true also records every
+	// successful read.
+	v1.Use(audit.Middleware(audit.NewDBRecorder(db), audit.Options{
+		Reads:    os.Getenv("AUDIT_READS") == "true",
+		Required: os.Getenv("AUDIT_REQUIRED") != "false",
+	}))
 	{
 		// Authentication routes (no auth required)
 		auth := v1.Group("/auth")

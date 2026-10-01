@@ -31,7 +31,8 @@ func NewAuditHandler(db *database.Database) *AuditHandler {
 // @Param action query string false "Exact action, e.g. users:update_role or auth:login"
 // @Param resource_type query string false "Data type, e.g. labs, sessions, users"
 // @Param resource_id query string false "ID of the record acted on"
-// @Param outcome query string false "success, denied or failure"
+// @Param outcome query string false "attempted, success, denied or failure"
+// @Param request_id query string false "Both entries of one change"
 // @Param ip_address query string false "Client address"
 // @Param from query string false "Entries at or after this time (RFC 3339)"
 // @Param to query string false "Entries before this time (RFC 3339)"
@@ -58,6 +59,14 @@ func (h *AuditHandler) ListAuditLogs(c *gin.Context) {
 			return
 		}
 		query = query.Where("user_id = ?", userID)
+	}
+	if v := c.Query("request_id"); v != "" {
+		requestID, err := uuid.Parse(v)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request_id"})
+			return
+		}
+		query = query.Where("request_id = ?", requestID)
 	}
 	for _, column := range []string{"action", "resource_type", "resource_id", "outcome", "ip_address"} {
 		if v := c.Query(column); v != "" {

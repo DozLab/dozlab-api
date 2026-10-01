@@ -3,11 +3,13 @@ package audit
 import (
 	"os"
 	"testing"
+	"time"
 
 	"dozlab-backend/internal/database"
 	"dozlab-backend/internal/models"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // Runs only against a real PostgreSQL with the migrations applied (001–004):
@@ -73,6 +75,56 @@ func TestPostgres_AuditLogIsAppendOnly(t *testing.T) {
 	bad := &models.AuditLog{Action: "x", Outcome: "maybe"}
 	if err := NewDBRecorder(db).Record(bad); err == nil {
 		t.Error("an entry with an unknown outcome was accepted")
+	}
+
+	// An attempted entry is accepted, with a request ID
+	requestID := uuid.New()
+	attempt := &models.AuditLog{Action: "POST /api/v1/labs/", Outcome: OutcomeAttempted, RequestID: &requestID}
+	if err := NewDBRecorder(db).Record(attempt); err != nil {
+		t.Errorf("an attempted entry was refused: %v", err)
+	}
+
+	// Retention: the purge removes an entry older than 30 days and nothing younger
+	old := &models.AuditLog{Action: "old-" + uuid.NewString()[:8], Outcome: OutcomeSuccess, CreatedAt: time.Now().AddDate(0, 0, -45)}
+	if err := NewDBRecorder(db).Record(old); err != nil {
+		t.Fatalf("record old entry: %v", err)
+	}
+	if err := db.DB.Exec("DELETE FROM audit_logs WHERE id = ?", old.ID).Error; err == nil {
+		t.Error("a plain DELETE of an old entry succeeded; only the purge may remove it")
+	}
+	removed, err := Purge(db, 30, time.Now())
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if removed < 1 {
+		t.Errorf("purge removed %d entries, want the 45-day-old one", removed)
+	}
+	var n int64
+	db.DB.Model(&models.AuditLog{}).Where("id = ?", old.ID).Count(&n)
+	if n != 0 {
+		t.Error("the 45-day-old entry is still there after the purge")
+	}
+	db.DB.Model(&models.AuditLog{}).Where("id = ?", entry.ID).Count(&n)
+	if n != 1 {
+		t.Error("the purge removed an entry younger than 30 days")
+	}
+	// Even with the purge setting on, the database refuses to delete a young entry
+	err = db.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT set_config('dozlab.audit_purge', 'on', true)").Error; err != nil {
+			return err
+		}
+		return tx.Exec("DELETE FROM audit_logs WHERE id = ?", entry.ID).Error
+	})
+	if err == nil {
+		t.Error("an entry younger than 30 days was deleted with the purge setting on")
+	}
+	// ... and still refuses UPDATE and TRUNCATE
+	err = db.DB.Transaction(func(tx *gorm.DB) error {
+		tx.Exec("SELECT set_config('dozlab.audit_purge', 'on', true)")
+		return tx.Exec("UPDATE audit_logs SET outcome = 'denied' WHERE id = ?", entry.ID).Error
+	})
+	if err == nil {
+		t.Error("an UPDATE succeeded with the purge setting on")
 	}
 
 	// Deleting the user works and the entry keeps the user's ID

@@ -50,7 +50,8 @@ func (j *JSONText) UnmarshalJSON(data []byte) error {
 
 // AuditLog is one entry in the audit log: who did what to which record, from where, when, and
 // whether it was allowed (migrations 001 and 004). Entries are only ever added: the database
-// refuses updates and deletes on this table, and the API has no route that changes one.
+// refuses updates and deletes on this table, and the API has no route that changes one. The
+// retention purge removes entries once they are older than the retention period (audit.Purge).
 type AuditLog struct {
 	ID uuid.UUID `json:"id" gorm:"type:uuid;primary_key"`
 	// Who. UserID is empty when nobody was logged in (a failed login, a request without a
@@ -61,14 +62,17 @@ type AuditLog struct {
 	Action       string  `json:"action" gorm:"type:varchar(100);not null;index:idx_audit_action"`
 	ResourceType *string `json:"resource_type,omitempty" gorm:"type:varchar(50);index:idx_audit_resource,priority:1"`
 	ResourceID   *string `json:"resource_id,omitempty" gorm:"type:varchar(255);index:idx_audit_resource,priority:2"`
-	// success, denied (401 or 403) or failure (any other 4xx or 5xx)
-	Outcome    string    `json:"outcome" gorm:"type:varchar(20);not null;index:idx_audit_outcome"`
-	Method     string    `json:"method" gorm:"type:varchar(10)"`
-	Path       string    `json:"path" gorm:"type:varchar(255)"`
-	StatusCode int       `json:"status_code"`
-	OldValues  *JSONText `json:"old_values,omitempty" gorm:"type:jsonb"`
-	NewValues  *JSONText `json:"new_values,omitempty" gorm:"type:jsonb"`
-	Metadata   *JSONText `json:"metadata,omitempty" gorm:"type:jsonb"`
+	// attempted (written before a change runs), then success, denied (401 or 403) or failure
+	// (any other 4xx or 5xx)
+	Outcome string `json:"outcome" gorm:"type:varchar(20);not null;index:idx_audit_outcome"`
+	// RequestID is the same on a change's attempted entry and on the entry with its outcome
+	RequestID  *uuid.UUID `json:"request_id,omitempty" gorm:"type:uuid;index:idx_audit_request"`
+	Method     string     `json:"method" gorm:"type:varchar(10)"`
+	Path       string     `json:"path" gorm:"type:varchar(255)"`
+	StatusCode int        `json:"status_code"`
+	OldValues  *JSONText  `json:"old_values,omitempty" gorm:"type:jsonb"`
+	NewValues  *JSONText  `json:"new_values,omitempty" gorm:"type:jsonb"`
+	Metadata   *JSONText  `json:"metadata,omitempty" gorm:"type:jsonb"`
 	// From where
 	IPAddress *string `json:"ip_address,omitempty" gorm:"type:inet"`
 	UserAgent *string `json:"user_agent,omitempty" gorm:"type:text"`

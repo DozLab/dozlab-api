@@ -1133,7 +1133,7 @@ checks the JWT and session ownership (then iframes work too); the same for the t
 | # | The question | Before 2026-10-01 | Now | Still open |
 |---|---|---|---|---|
 | 1 | **Access control:** permissions by role, by action, by data type, scoped by team | three roles, with `if role != "admin"` spread over the handlers; students could edit lab specs and set any session's status | one table of which role has which permission (`internal/authz`), named on every route; a role or status change applies to the next request | scoping by team or organisation: there is no team in the schema |
-| 2 | **Audit log:** who did what, from where, when; immutable, queryable, separate from app data | an `audit_logs` table nothing wrote to | every change, every refused or failed request and the sensitive reads are recorded; the database refuses updates and deletes; admins can query it | it is in the same database as the app data; retention and export aren't set |
+| 2 | **Audit log:** who did what, from where, when; immutable, queryable, separate from app data | an `audit_logs` table nothing wrote to | every change, every refused or failed request and the sensitive reads are recorded; the database refuses updates and deletes; a change that can't be recorded is refused; entries are kept 30 days; admins can query it | it is in the same database as the app data; 30 days is short for an audit; no export |
 | 3 | **Customer isolation:** one customer's data kept apart from another's, in the architecture | none in the data: no tenant in the schema, one Kubernetes namespace for every session. Compute is isolated: each lab is its own Firecracker microVM | unchanged | everything; see [Customer isolation](#customer-isolation-not-decided) |
 
 ## Access control (built)
@@ -1183,7 +1183,18 @@ labs yet.
 - **What is never recorded.** Request bodies, so no passwords or tokens, and no query strings.
 - **Immutable in the database.** Migration 004 adds triggers that refuse `UPDATE`, `DELETE` and
   `TRUNCATE` on `audit_logs` for every database user, including the API's. The API has no
-  route that changes an entry. An entry keeps the user's ID after the user is deleted.
+  route that changes an entry. An entry keeps the user's ID after the user is deleted. The one
+  exception is the retention purge below.
+- **A change that can't be recorded is refused** (owner decision, 2026-10-01). Before a change
+  runs, an `attempted` entry is written. If that write fails, the request gets 503 and nothing
+  happens, so no change takes place without a trace. The entry with the outcome follows and
+  has the same `request_id`. Reads are never refused. This means a broken audit log stops
+  every change, including logins; `AUDIT_REQUIRED=false` turns it off (one entry per change,
+  a failed write is only logged).
+- **Kept for 30 days** (owner decision, 2026-10-01). Once a day the API removes entries older
+  than `AUDIT_RETENTION_DAYS` (default 30) and records the purge, with how many it removed.
+  The setting can be raised, or set to 0 to keep entries for ever, but not lowered: the
+  database refuses to delete an entry younger than 30 days, whatever the setting is.
 - **Queryable.** `GET /api/v1/admin/audit-logs` (permission `audit:read`), filtered by user,
   action, data type, record, outcome, IP address and time range, newest first.
 
@@ -1194,9 +1205,12 @@ labs yet.
   can move without touching the callers. Options: a second PostgreSQL database with a
   write-only user for the API; or shipping entries to an external store (object storage with
   object lock, or a log service). The second gives the stronger answer.
-- **Retention and export.** No retention period, archive or export is set.
-- **Writes are best effort.** If the log can't be written, the request still succeeds and the
-  failure goes to the server log. The strict alternative is to refuse the request.
+- **30 days is short for an audit.** SOC 2 auditors usually look at a period of months, and
+  common practice is to keep audit logs for a year. Raise `AUDIT_RETENTION_DAYS`, or archive
+  entries before they are purged, before an audit. There is no archive or export yet.
+- **An outcome entry can still be lost.** If the write after the change fails, the change has
+  its `attempted` entry (who is not on it yet: the token hasn't been checked at that point)
+  but no outcome.
 - **Actions outside the API.** Changes made straight in the database or the cluster, and what
   a student does inside a lab VM, aren't in this log.
 
@@ -1228,7 +1242,8 @@ Cilium, or Canal to keep Flannel).
 ## Still to decide
 
 1. What a customer is, and option A, B or C.
-2. Where the audit log lives (second database or an external store), how long it is kept, and
-   whether a failed audit write should refuse the request.
+2. Where the audit log lives (second database or an external store), and whether entries are
+   archived before the 30-day purge. Decided on 2026-10-01: kept 30 days by default, and a
+   change that can't be recorded is refused.
 3. Whether instructors may write specs only for their own labs.
 4. Whether to test and add network policies on the local cluster.

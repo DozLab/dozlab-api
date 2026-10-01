@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"dozlab-backend/internal/api"
+	"dozlab-backend/internal/audit"
 	"dozlab-backend/internal/config"
 	"dozlab-backend/internal/container"
 	"dozlab-backend/internal/database"
@@ -77,6 +78,9 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Audit entries older than AUDIT_RETENTION_DAYS (default 30) are removed once a day
+	audit.StartRetention(ctx, db, audit.RetentionDays(os.Getenv("AUDIT_RETENTION_DAYS")))
 
 	errCh := make(chan error, 1)
 	go func() {

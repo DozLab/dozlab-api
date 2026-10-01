@@ -356,3 +356,59 @@ func TestAudit_QueryAndNoWayToChange(t *testing.T) {
 		}
 	}
 }
+
+// A change that can't be recorded doesn't happen (owner decision, 2026-10-01).
+func TestAudit_ChangeIsRefusedWhenItCannotBeRecorded(t *testing.T) {
+	env := newAccessEnv(t)
+	labs := func() int64 {
+		var n int64
+		require.NoError(t, env.db.DB.Model(&models.Lab{}).Count(&n).Error)
+		return n
+	}
+
+	// Working audit log: the change has an attempted entry and an outcome entry, tied together
+	require.Equal(t, 201, env.do("POST", "/api/v1/labs/", "instructor", newLab).Code)
+	result := env.entries(t, "action = ? AND outcome = ?", "labs:create", "success")
+	require.Len(t, result, 1)
+	require.NotNil(t, result[0].RequestID)
+	pair := env.entries(t, "request_id = ?", *result[0].RequestID)
+	require.Len(t, pair, 2)
+	assert.Equal(t, "attempted", pair[0].Outcome)
+	assert.Equal(t, "POST /api/v1/labs/", pair[0].Action)
+	assert.Equal(t, "203.0.113.7", deref(pair[0].IPAddress))
+	assert.Equal(t, "success", pair[1].Outcome)
+
+	// Break the audit log
+	require.NoError(t, env.db.DB.Exec("DROP TABLE audit_logs").Error)
+	before := labs()
+
+	w := env.do("POST", "/api/v1/labs/", "instructor", `{"name":"Unrecorded lab","slug":"unrecorded-lab"}`)
+	assert.Equal(t, 503, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "audit log is unavailable")
+	assert.Equal(t, before, labs(), "the lab must not be created when the change can't be recorded")
+
+	target := env.users["student"].ID
+	assert.Equal(t, 503, env.do("PUT", "/api/v1/admin/users/"+target.String()+"/role", "admin", `{"role":"admin"}`).Code)
+	var student models.User
+	require.NoError(t, env.db.DB.First(&student, "id = ?", target).Error)
+	assert.Equal(t, "student", student.Role, "the role must not change when the change can't be recorded")
+
+	assert.Equal(t, 503, env.do("POST", "/api/v1/auth/login", "", `{"username":"admin1","password":"Correct-Horse-9!"}`).Code)
+
+	// Reads still work
+	assert.Equal(t, 200, env.do("GET", "/api/v1/labs/", "student", "").Code)
+}
+
+func TestAudit_NotRequiredLetsTheChangeThrough(t *testing.T) {
+	t.Setenv("AUDIT_REQUIRED", "false")
+	env := newAccessEnv(t)
+
+	// Not required: one entry per change, no attempted entry
+	require.Equal(t, 201, env.do("POST", "/api/v1/labs/", "instructor", newLab).Code)
+	assert.Len(t, env.entries(t, "outcome = ?", "attempted"), 0)
+	assert.Len(t, env.entries(t, "action = ?", "labs:create"), 1)
+
+	require.NoError(t, env.db.DB.Exec("DROP TABLE audit_logs").Error)
+	w := env.do("POST", "/api/v1/labs/", "instructor", `{"name":"Unrecorded lab","slug":"unrecorded-lab"}`)
+	assert.Equal(t, 201, w.Code, w.Body.String())
+}

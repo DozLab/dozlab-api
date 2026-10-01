@@ -277,6 +277,10 @@ ALLOWED_ORIGINS=http://localhost:3000,https://yourdomain.com
 # Audit log: also record every successful read (default: changes, refused and failed
 # requests, and sensitive reads only)
 AUDIT_READS=false
+# Refuse a change (503) when it can't be recorded. false: only log the failed write
+AUDIT_REQUIRED=true
+# Days an audit entry is kept. Minimum 30; 0 keeps entries for ever
+AUDIT_RETENTION_DAYS=30
 ```
 
 ### Access control and audit log
@@ -286,6 +290,8 @@ AUDIT_READS=false
 - **Audit log:** `internal/audit` records who did what, to which record, from where and when in
   the `audit_logs` table. Migration `004_audit_log.up.sql` must be applied: it adds the columns
   and makes the table append-only. Admins read the log at `GET /api/v1/admin/audit-logs`.
+  **Without the migration every change is refused with 503**, logins included, because a change
+  that can't be recorded isn't allowed (`AUDIT_REQUIRED`).
 - The append-only rule is a PostgreSQL trigger, so its test needs a real database:
   `AUDIT_TEST_DATABASE_URL=postgres://... go test ./internal/audit/` (migrations applied).
 

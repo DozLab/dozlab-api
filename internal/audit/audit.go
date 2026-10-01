@@ -17,11 +17,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// How a request ended.
+// How a request ended. A change also has an earlier entry, attempted, written before it runs.
 const (
-	OutcomeSuccess = "success"
-	OutcomeDenied  = "denied"  // 401 or 403
-	OutcomeFailure = "failure" // any other 4xx or 5xx
+	OutcomeAttempted = "attempted"
+	OutcomeSuccess   = "success"
+	OutcomeDenied    = "denied"  // 401 or 403
+	OutcomeFailure   = "failure" // any other 4xx or 5xx
 )
 
 // Recorder stores audit entries. The API has one implementation, DBRecorder; the interface is
@@ -96,23 +97,52 @@ type Options struct {
 	// Reads also records successful reads (GET). Without it the log has every change, every
 	// refused or failed request, and the reads marked Always (admin routes, the log itself).
 	Reads bool
+	// Required refuses a change when it can't be recorded: an "attempted" entry is written
+	// before the change runs, and if that fails the request gets 503 and nothing happens. So no
+	// change can take place without a trace in the log (owner decision, 2026-10-01). Without
+	// it, a failed write is only logged.
+	Required bool
 }
 
 // Middleware records an entry for each request once it has been handled. Put it before the
 // authentication middleware, so requests refused for a missing or bad token are recorded too.
-// A recorder that fails is logged and doesn't fail the request.
+// With Options.Required, a change that can't be recorded is refused; reads are never refused.
 func Middleware(recorder Recorder, opts Options) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Next()
-
 		method := c.Request.Method
 		if method == http.MethodOptions {
-			return // CORS preflight
+			c.Next() // CORS preflight
+			return
 		}
+		isRead := method == http.MethodGet || method == http.MethodHead
+		requestID := uuid.New()
+
+		if opts.Required && !isRead {
+			attempt := &models.AuditLog{
+				Action:     method + " " + routeOf(c),
+				Outcome:    OutcomeAttempted,
+				RequestID:  &requestID,
+				Method:     method,
+				Path:       c.Request.URL.Path,
+				IPAddress:  optional(c.ClientIP()),
+				UserAgent:  optional(c.Request.UserAgent()),
+				ResourceID: optional(firstParam(c, "labId", "id")),
+			}
+			if err := recorder.Record(attempt); err != nil {
+				log.Printf("AUDIT WRITE FAILED, request refused: %v (%s %s)", err, method, c.Request.URL.Path)
+				c.JSON(http.StatusServiceUnavailable, gin.H{
+					"error": "The audit log is unavailable, so this change was refused",
+				})
+				c.Abort()
+				return
+			}
+		}
+
+		c.Next()
+
 		status := c.Writer.Status()
 		details := Annotate(c)
 		outcome := outcomeFor(status)
-		isRead := method == http.MethodGet || method == http.MethodHead
 		if isRead && outcome == OutcomeSuccess && !details.Always && !opts.Reads {
 			return
 		}
@@ -120,6 +150,7 @@ func Middleware(recorder Recorder, opts Options) gin.HandlerFunc {
 		entry := &models.AuditLog{
 			Action:     details.Action,
 			Outcome:    outcome,
+			RequestID:  &requestID,
 			Method:     method,
 			Path:       c.Request.URL.Path, // no query string: it can carry tokens
 			StatusCode: status,
@@ -153,8 +184,10 @@ func Middleware(recorder Recorder, opts Options) gin.HandlerFunc {
 		entry.NewValues = jsonOf(details.New)
 		entry.Metadata = jsonOf(details.Metadata)
 
+		// Too late to refuse: the request has been handled. With Required, a change already has
+		// its attempted entry.
 		if err := recorder.Record(entry); err != nil {
-			log.Printf("AUDIT WRITE FAILED: %v (action=%s outcome=%s path=%s)", err, entry.Action, entry.Outcome, entry.Path)
+			log.Printf("AUDIT WRITE FAILED: %v (action=%s outcome=%s path=%s request_id=%s)", err, entry.Action, entry.Outcome, entry.Path, requestID)
 		}
 	}
 }
