@@ -5,7 +5,10 @@
 #
 #   scripts/e2e-timing.sh up     # Postgres in Docker, schema, RabbitMQ port-forward, API
 #   scripts/e2e-timing.sh run [vm|k8s|all]   # per lab: time create -> running and delete -> gone
-#   scripts/e2e-timing.sh down   # stop the API and port-forward, remove the containers
+#   scripts/e2e-timing.sh down   # stop the API and port-forward, remove the container; the data stays
+#   scripts/e2e-timing.sh reset  # down, and delete the Postgres data (users, labs, sessions, audit log)
+#
+# Postgres keeps its data in the Docker volume $PG_VOLUME, so users and labs outlive 'up' and 'down'.
 #
 # Needs docker, go, kubectl, jq and curl, and a cluster with the dozlab controller and RabbitMQ
 # (namespace dozlab, Secret rabbitmq-credentials). Uses $KUBECONFIG like kubectl does.
@@ -22,6 +25,7 @@ STATE="${E2E_STATE:-$HOME/.dozlab-e2e}"   # passwords, pids, logs; outside the r
 TIMINGS="${TIMINGS:-$([[ -d $HOME/.dozlab-local ]] && echo "$HOME/.dozlab-local/timings.jsonl" || echo "$STATE/timings.jsonl")}"
 API_PORT="${API_PORT:-18080}"
 PG_PORT="${PG_PORT:-55432}" RABBIT_PORT="${RABBIT_PORT:-55672}"
+PG_VOLUME="${PG_VOLUME:-dozlab-e2e-pgdata}"   # Postgres data; 'reset' deletes it
 NS=default                 # the API creates LabSessions (and so lab pods) in "default"
 STAGE_TIMEOUT="${STAGE_TIMEOUT:-300}"   # seconds per stage before the run fails
 API="http://127.0.0.1:$API_PORT/api/v1"
@@ -45,6 +49,18 @@ summary() {
 }
 load_env() { [[ -f "$STATE/env" ]] || die "run '$0 up' first"; set -a; source "$STATE/env"; set +a; }
 alive() { [[ -f "$STATE/$1.pid" ]] && kill -0 "$(cat "$STATE/$1.pid")" 2>/dev/null; }
+# migrate <dir> <psql command...>: applies each *.up.sql in <dir> once. The database keeps the
+# names of the applied files in e2e_migrations, so a later 'up' on the same volume only applies
+# new ones. A file and its e2e_migrations row go in one transaction.
+migrate() {
+  local dir=$1 f name; shift
+  "$@" -c "SET client_min_messages = warning" -c "CREATE TABLE IF NOT EXISTS e2e_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())" </dev/null >/dev/null
+  for f in "$dir"/*.up.sql; do
+    name=$(basename "$f")
+    [[ -z "$("$@" -tA -c "SELECT 1 FROM e2e_migrations WHERE name = '$name'" </dev/null)" ]] || continue
+    { cat "$f"; printf "\nINSERT INTO e2e_migrations (name) VALUES ('%s');\n" "$name"; } | "$@" -1 -f - >/dev/null
+  done
+}
 
 # ---------------------------------------------------------------------------------------------
 up() {
@@ -66,28 +82,35 @@ up() {
   # dozlab-e2e-redis: left over from versions of this script that started Redis
   docker rm -f dozlab-e2e-pg dozlab-e2e-redis >/dev/null 2>&1 || true
   docker run -d --name dozlab-e2e-pg -e POSTGRES_PASSWORD="$PG_PASSWORD" -e POSTGRES_DB=dozlab \
-    -p 127.0.0.1:$PG_PORT:5432 postgres:16-alpine >/dev/null
+    -v "$PG_VOLUME":/var/lib/postgresql/data -p 127.0.0.1:$PG_PORT:5432 postgres:16-alpine >/dev/null
   # Over TCP: on first start the image runs a temporary server on the Unix socket only, before
   # it creates the "dozlab" database; that one would pass a socket check too early.
   for _ in $(seq 60); do docker exec dozlab-e2e-pg pg_isready -q -h 127.0.0.1 -U postgres -d dozlab && break; sleep 0.5; done
-  for f in "$REPO"/internal/database/migrations/*.up.sql; do
-    docker exec -i dozlab-e2e-pg psql -q -v ON_ERROR_STOP=1 -U postgres -d dozlab < "$f" >/dev/null
-  done
+  local pg="docker exec -i dozlab-e2e-pg psql -q -v ON_ERROR_STOP=1 -U postgres"
+  # The image sets passwords only when it creates the data, so on a volume that is older than
+  # $STATE/env they are set again here (and for the audit logins below).
+  $pg -d postgres -c "ALTER ROLE postgres PASSWORD '$PG_PASSWORD'" </dev/null >/dev/null
+  migrate "$REPO/internal/database/migrations" $pg -d dozlab
   # The audit store: a database of its own with its own owner, and one login that may only add
   # entries (the API writes with it) and one that may only read them. Same server here; in
   # production it should be a separate one.
-  local pg="docker exec -i dozlab-e2e-pg psql -q -v ON_ERROR_STOP=1 -U postgres"
+  # \gexec runs each row of the SELECT as a statement: the role and database are made once.
   $pg -d postgres >/dev/null <<SQL
-CREATE ROLE dozlab_audit_owner LOGIN CREATEROLE PASSWORD '$AUDIT_OWNER_PASSWORD';
-CREATE DATABASE dozlab_audit OWNER dozlab_audit_owner;
+SELECT 'CREATE ROLE dozlab_audit_owner LOGIN CREATEROLE'
+  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dozlab_audit_owner')\gexec
+ALTER ROLE dozlab_audit_owner PASSWORD '$AUDIT_OWNER_PASSWORD';
+SELECT 'CREATE DATABASE dozlab_audit OWNER dozlab_audit_owner'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'dozlab_audit')\gexec
 SQL
-  for f in "$REPO"/internal/database/audit_migrations/*.up.sql; do
-    docker exec -i -e PGPASSWORD="$AUDIT_OWNER_PASSWORD" dozlab-e2e-pg \
-      psql -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U dozlab_audit_owner -d dozlab_audit < "$f" >/dev/null
-  done
+  migrate "$REPO/internal/database/audit_migrations" docker exec -i -e PGPASSWORD="$AUDIT_OWNER_PASSWORD" \
+    dozlab-e2e-pg psql -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U dozlab_audit_owner -d dozlab_audit
   $pg -d postgres >/dev/null <<SQL
-CREATE ROLE dozlab_api_audit LOGIN PASSWORD '$AUDIT_WRITER_PASSWORD' IN ROLE dozlab_audit_writer;
-CREATE ROLE dozlab_audit_admin LOGIN PASSWORD '$AUDIT_READER_PASSWORD' IN ROLE dozlab_audit_reader;
+SELECT 'CREATE ROLE dozlab_api_audit LOGIN IN ROLE dozlab_audit_writer'
+  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dozlab_api_audit')\gexec
+SELECT 'CREATE ROLE dozlab_audit_admin LOGIN IN ROLE dozlab_audit_reader'
+  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dozlab_audit_admin')\gexec
+ALTER ROLE dozlab_api_audit PASSWORD '$AUDIT_WRITER_PASSWORD';
+ALTER ROLE dozlab_audit_admin PASSWORD '$AUDIT_READER_PASSWORD';
 SQL
   record "up: postgres + schema + audit store" "$t" "$(now)" ok
 
@@ -122,7 +145,13 @@ SQL
 down() {
   for p in api portforward; do alive $p && kill "$(cat "$STATE/$p.pid")" || true; rm -f "$STATE/$p.pid"; done
   docker rm -f dozlab-e2e-pg dozlab-e2e-redis >/dev/null 2>&1 || true
-  echo "stopped (credentials kept in $STATE/env)"
+  echo "stopped (credentials kept in $STATE/env, data in the Docker volume $PG_VOLUME)"
+}
+
+reset() {
+  down
+  docker volume rm "$PG_VOLUME" >/dev/null 2>&1 || true
+  echo "deleted the Postgres data ($PG_VOLUME)"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -262,5 +291,6 @@ case "${1:-}" in
   up) up ;;
   run) run "${2:-vm}" ;;
   down) down ;;
-  *) die "usage: $0 up|run [vm|k8s|all]|down" ;;
+  reset) reset ;;
+  *) die "usage: $0 up|run [vm|k8s|all]|down|reset" ;;
 esac
