@@ -3,12 +3,17 @@
 # POST /api/v1/lab-sessions -> LabSession -> controller -> pod -> VM ready -> API says running,
 # then DELETE -> pod, LabSession and the session's SSH key Secret gone.
 #
-#   scripts/e2e-timing.sh up     # Postgres in Docker, schema, RabbitMQ port-forward, API
+#   scripts/e2e-timing.sh up     # schema, Postgres and RabbitMQ port-forwards, API
 #   scripts/e2e-timing.sh run [vm|k8s|all]   # per lab: time create -> running and delete -> gone
-#   scripts/e2e-timing.sh down   # stop the API and port-forward, remove the containers
+#   scripts/e2e-timing.sh down   # stop the API and the port-forwards
 #
-# Needs docker, go, kubectl, jq and curl, and a cluster with the dozlab controller and RabbitMQ
-# (namespace dozlab, Secret rabbitmq-credentials). Uses $KUBECONFIG like kubectl does.
+# The database is the cluster's (dozlab-infra/postgres.yaml: StatefulSet postgres in namespace
+# dozlab, data on a PVC). This script connects to it and applies new migrations; it never
+# creates or removes it, so users and labs outlive 'up' and 'down'.
+#
+# Needs go, kubectl, jq and curl, and a cluster with the dozlab controller, RabbitMQ and Postgres
+# (namespace dozlab, Secrets rabbitmq-credentials and postgres-credentials). Uses $KUBECONFIG
+# like kubectl does.
 # Each lab is a published row with its own init image (labs.init_image, which the API passes to
 # the controller as spec.customImages.initImage): E2E_IMAGE_VM / E2E_IMAGE_K8S, default
 # dozlab-init:local and dozman99/dozlab-init-k8s:local. The image must already be on the node.
@@ -45,14 +50,26 @@ summary() {
 }
 load_env() { [[ -f "$STATE/env" ]] || die "run '$0 up' first"; set -a; source "$STATE/env"; set +a; }
 alive() { [[ -f "$STATE/$1.pid" ]] && kill -0 "$(cat "$STATE/$1.pid")" 2>/dev/null; }
+pgx() { kubectl -n dozlab exec -i postgres-0 -- "$@"; }   # run a command in the Postgres pod
+# migrate <dir> <psql command...>: applies each *.up.sql in <dir> once. The database keeps the
+# names of the applied files in e2e_migrations, so a later 'up' on the same volume only applies
+# new ones. A file and its e2e_migrations row go in one transaction.
+migrate() {
+  local dir=$1 f name; shift
+  "$@" -c "SET client_min_messages = warning" -c "CREATE TABLE IF NOT EXISTS e2e_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())" </dev/null >/dev/null
+  for f in "$dir"/*.up.sql; do
+    name=$(basename "$f")
+    [[ -z "$("$@" -tA -c "SELECT 1 FROM e2e_migrations WHERE name = '$name'" </dev/null)" ]] || continue
+    { cat "$f"; printf "\nINSERT INTO e2e_migrations (name) VALUES ('%s');\n" "$name"; } | "$@" -1 -f - >/dev/null
+  done
+}
 
 # ---------------------------------------------------------------------------------------------
 up() {
-  for c in docker go kubectl jq curl; do command -v $c >/dev/null || die "$c not found"; done
+  for c in go kubectl jq curl; do command -v $c >/dev/null || die "$c not found"; done
   RUN_ID="$(date +%Y%m%dT%H%M%S)-e2e-up"
   if [[ ! -f "$STATE/env" ]]; then   # generated once and reused; never printed
-    { echo "PG_PASSWORD=$(openssl rand -hex 16)"; echo "JWT_SECRET=$(openssl rand -hex 32)"
-      echo "E2E_PASSWORD=$(openssl rand -hex 12)"; } > "$STATE/env"
+    { echo "JWT_SECRET=$(openssl rand -hex 32)"; echo "E2E_PASSWORD=$(openssl rand -hex 12)"; } > "$STATE/env"
     chmod 600 "$STATE/env"
   fi
   # The audit store's three logins (added later than the others, so an older env file gets them)
@@ -62,34 +79,48 @@ up() {
   load_env
   local t
 
-  say "Postgres (Docker)"; t=$(now)
-  # dozlab-e2e-redis: left over from versions of this script that started Redis
-  docker rm -f dozlab-e2e-pg dozlab-e2e-redis >/dev/null 2>&1 || true
-  docker run -d --name dozlab-e2e-pg -e POSTGRES_PASSWORD="$PG_PASSWORD" -e POSTGRES_DB=dozlab \
-    -p 127.0.0.1:$PG_PORT:5432 postgres:16-alpine >/dev/null
-  # Over TCP: on first start the image runs a temporary server on the Unix socket only, before
-  # it creates the "dozlab" database; that one would pass a socket check too early.
-  for _ in $(seq 60); do docker exec dozlab-e2e-pg pg_isready -q -h 127.0.0.1 -U postgres -d dozlab && break; sleep 0.5; done
-  for f in "$REPO"/internal/database/migrations/*.up.sql; do
-    docker exec -i dozlab-e2e-pg psql -q -v ON_ERROR_STOP=1 -U postgres -d dozlab < "$f" >/dev/null
-  done
+  say "Postgres (cluster, namespace dozlab)"; t=$(now)
+  kubectl -n dozlab get statefulset postgres >/dev/null 2>&1 ||
+    die "no Postgres in namespace dozlab; apply dozlab-infra/postgres.yaml first (its README, \"PostgreSQL\")"
+  kubectl -n dozlab rollout status statefulset/postgres --timeout=180s >/dev/null
+  # Containers of versions of this script that ran Postgres and Redis in Docker; the Postgres
+  # one would still hold $PG_PORT
+  ! command -v docker >/dev/null || docker rm -f dozlab-e2e-pg dozlab-e2e-redis >/dev/null 2>&1 || true
+  local pg_password; pg_password=$(kubectl -n dozlab get secret postgres-credentials -o jsonpath='{.data.password}' | base64 -d)
+  local pg="pgx psql -q -v ON_ERROR_STOP=1 -U postgres"
+  migrate "$REPO/internal/database/migrations" $pg -d dozlab
   # The audit store: a database of its own with its own owner, and one login that may only add
   # entries (the API writes with it) and one that may only read them. Same server here; in
   # production it should be a separate one.
-  local pg="docker exec -i dozlab-e2e-pg psql -q -v ON_ERROR_STOP=1 -U postgres"
+  # \gexec runs each row of the SELECT as a statement: the role and database are made once.
+  # The image only sets passwords when it creates the data, so the audit logins get theirs from
+  # $STATE/env on every 'up'.
   $pg -d postgres >/dev/null <<SQL
-CREATE ROLE dozlab_audit_owner LOGIN CREATEROLE PASSWORD '$AUDIT_OWNER_PASSWORD';
-CREATE DATABASE dozlab_audit OWNER dozlab_audit_owner;
+SELECT 'CREATE ROLE dozlab_audit_owner LOGIN CREATEROLE'
+  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dozlab_audit_owner')\gexec
+ALTER ROLE dozlab_audit_owner PASSWORD '$AUDIT_OWNER_PASSWORD';
+SELECT 'CREATE DATABASE dozlab_audit OWNER dozlab_audit_owner'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'dozlab_audit')\gexec
 SQL
-  for f in "$REPO"/internal/database/audit_migrations/*.up.sql; do
-    docker exec -i -e PGPASSWORD="$AUDIT_OWNER_PASSWORD" dozlab-e2e-pg \
-      psql -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U dozlab_audit_owner -d dozlab_audit < "$f" >/dev/null
-  done
+  # As the audit owner (the superuser takes its role), so the owner owns what the files create
+  migrate "$REPO/internal/database/audit_migrations" pgx psql -q -v ON_ERROR_STOP=1 \
+    "dbname=dozlab_audit user=postgres options='-c role=dozlab_audit_owner'"
   $pg -d postgres >/dev/null <<SQL
-CREATE ROLE dozlab_api_audit LOGIN PASSWORD '$AUDIT_WRITER_PASSWORD' IN ROLE dozlab_audit_writer;
-CREATE ROLE dozlab_audit_admin LOGIN PASSWORD '$AUDIT_READER_PASSWORD' IN ROLE dozlab_audit_reader;
+SELECT 'CREATE ROLE dozlab_api_audit LOGIN IN ROLE dozlab_audit_writer'
+  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dozlab_api_audit')\gexec
+SELECT 'CREATE ROLE dozlab_audit_admin LOGIN IN ROLE dozlab_audit_reader'
+  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dozlab_audit_admin')\gexec
+ALTER ROLE dozlab_api_audit PASSWORD '$AUDIT_WRITER_PASSWORD';
+ALTER ROLE dozlab_audit_admin PASSWORD '$AUDIT_READER_PASSWORD';
 SQL
-  record "up: postgres + schema + audit store" "$t" "$(now)" ok
+  record "up: schema + audit store" "$t" "$(now)" ok
+
+  say "Postgres port-forward (cluster, namespace dozlab)"; t=$(now)
+  alive pgforward && kill "$(cat "$STATE/pgforward.pid")" || true
+  kubectl -n dozlab port-forward svc/postgres "$PG_PORT:5432" > "$STATE/pgforward.log" 2>&1 &
+  echo $! > "$STATE/pgforward.pid"
+  for _ in $(seq 40); do (exec 3<>/dev/tcp/127.0.0.1/$PG_PORT) 2>/dev/null && break; sleep 0.25; done
+  record "up: postgres port-forward" "$t" "$(now)" ok
 
   say "RabbitMQ port-forward (cluster, namespace dozlab)"; t=$(now)
   alive portforward && kill "$(cat "$STATE/portforward.pid")" || true
@@ -105,7 +136,7 @@ SQL
   ru=$(kubectl -n dozlab get secret rabbitmq-credentials -o jsonpath='{.data.username}' | base64 -d)
   rp=$(kubectl -n dozlab get secret rabbitmq-credentials -o jsonpath='{.data.password}' | base64 -d)
   PORT=$API_PORT JWT_SECRET="$JWT_SECRET" \
-    DB_HOST=127.0.0.1 DB_PORT=$PG_PORT DB_NAME=dozlab DB_USER=postgres DB_PASSWORD="$PG_PASSWORD" \
+    DB_HOST=127.0.0.1 DB_PORT=$PG_PORT DB_NAME=dozlab DB_USER=postgres DB_PASSWORD="$pg_password" \
     RABBITMQ_URL="amqp://$ru:$rp@127.0.0.1:$RABBIT_PORT/" \
     AUDIT_DATABASE_URL="postgres://dozlab_api_audit:$AUDIT_WRITER_PASSWORD@127.0.0.1:$PG_PORT/dozlab_audit?sslmode=disable" \
     AUDIT_READ_DATABASE_URL="postgres://dozlab_audit_admin:$AUDIT_READER_PASSWORD@127.0.0.1:$PG_PORT/dozlab_audit?sslmode=disable" \
@@ -120,13 +151,12 @@ SQL
 }
 
 down() {
-  for p in api portforward; do alive $p && kill "$(cat "$STATE/$p.pid")" || true; rm -f "$STATE/$p.pid"; done
-  docker rm -f dozlab-e2e-pg dozlab-e2e-redis >/dev/null 2>&1 || true
-  echo "stopped (credentials kept in $STATE/env)"
+  for p in api portforward pgforward; do alive $p && kill "$(cat "$STATE/$p.pid")" || true; rm -f "$STATE/$p.pid"; done
+  echo "stopped (credentials kept in $STATE/env; the database stays in the cluster)"
 }
 
 # ---------------------------------------------------------------------------------------------
-psql_q() { docker exec -i dozlab-e2e-pg psql -qtA -v ON_ERROR_STOP=1 -U postgres -d dozlab -c "$1"; }
+psql_q() { pgx psql -qtA -v ON_ERROR_STOP=1 -U postgres -d dozlab -c "$1" </dev/null; }
 api() {  # api <method> <path> [json]; prints the body, fails on HTTP >= 400
   local out code
   out=$(curl -sS -w '\n%{http_code}' -X "$1" "$API$2" -H 'Content-Type: application/json' \
