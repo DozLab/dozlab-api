@@ -462,11 +462,13 @@ every stage, from `POST /api/v1/lab-sessions` to the VM answering SSH and the AP
 
 ```bash
 export KUBECONFIG=~/.kube/dozlab-local.yaml
-scripts/e2e-timing.sh up          # Postgres in Docker, migrations, RabbitMQ port-forward, API
+scripts/e2e-timing.sh up          # migrations, Postgres and RabbitMQ port-forwards, API
 scripts/e2e-timing.sh run all     # vm and k8s labs (or: run vm / run k8s)
-scripts/e2e-timing.sh down        # the Postgres data stays, in the Docker volume dozlab-e2e-pgdata
-scripts/e2e-timing.sh reset       # down, and delete that data
+scripts/e2e-timing.sh down
 ```
+
+The database is the cluster's Postgres (`dozlab-infra/postgres.yaml`). The script connects to
+it and applies new migrations; it never creates or removes it, so users and labs are kept.
 
 Each lab is seeded as a published row with its own init image (`E2E_IMAGE_VM`,
 `E2E_IMAGE_K8S`). The run fails fast if the pod doesn't run that image. Each stage is
