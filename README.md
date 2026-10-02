@@ -44,8 +44,8 @@ DozLab uses a **Kubernetes sidecar pattern** with microservice API managing mult
                                           │                     │
                                           ▼                     ▼
                                  ┌─────────────────┐   ┌──────────────────┐
-                                 │ Kubernetes      │   │ PostgreSQL +     │
-                                 │ Service         │   │ Redis            │
+                                 │ Kubernetes      │   │ PostgreSQL       │
+                                 │ Service         │   │                  │
                                  │ (Load Balancer) │   │                  │
                                  │ • Port 8080     │   │ • Sessions       │
                                  │ • Port 8081     │   │ • Lab specs      │
@@ -101,14 +101,13 @@ DozLab uses a **Kubernetes sidecar pattern** with microservice API managing mult
 ## 📋 Quick Start
 
 ### **Development Setup**
-The server entrypoint is `cmd/api`. It needs PostgreSQL (with the schema applied), Redis and RabbitMQ.
+The server entrypoint is `cmd/api`. It needs PostgreSQL (with the schema applied) and RabbitMQ.
 
 ```bash
 cd dozlab-api
 
-# Start PostgreSQL + Redis + RabbitMQ (management UI on http://localhost:15672, guest/guest)
+# Start PostgreSQL + RabbitMQ (management UI on http://localhost:15672, guest/guest)
 docker run -d --name dozlab-pg -e POSTGRES_PASSWORD=password -e POSTGRES_DB=dozlab -p 5432:5432 postgres:16-alpine
-docker run -d --name dozlab-redis -p 6379:6379 redis:7-alpine
 docker run -d --name dozlab-rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
 
 # Apply the schema (the server does not run migrations)
@@ -117,7 +116,6 @@ for f in internal/database/migrations/*.up.sql; do docker exec -i dozlab-pg psql
 # Configure and run
 export JWT_SECRET=change-me-to-a-long-random-secret
 export DB_HOST=localhost DB_NAME=dozlab DB_USER=postgres DB_PASSWORD=password
-export REDIS_HOST=localhost
 export RABBITMQ_URL=amqp://guest:guest@localhost:5672/
 # The audit log needs a database of its own ("Access control and audit log" below). To try the
 # API without one, entries can go to the server log instead:
@@ -142,8 +140,6 @@ Settings read by `cmd/api` (see `internal/config`):
 | `DATABASE_URL` | — | Full Postgres URL; if unset it is built from `DB_*` |
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | port `5432` | Used when `DATABASE_URL` is unset |
 | `DB_SSLMODE` | `disable` | Used when `DATABASE_URL` is unset |
-| `REDIS_URL` | — | Full Redis URL; otherwise `REDIS_ADDR`, or `REDIS_HOST:REDIS_PORT` (port `6379`) |
-| `REDIS_PASSWORD`, `REDIS_DB` | db `0` | |
 | `RABBITMQ_URL` | — | Required; the server exits without it. AMQP URL of the event bus broker |
 | `RABBITMQ_PREFETCH` | `10` | Unacked deliveries per consumer |
 | `RABBITMQ_MAX_RETRIES` | `5` | Retries of a failed event before it goes to `dozlab.events.dlq` |
@@ -154,8 +150,7 @@ The server shuts down gracefully on SIGINT/SIGTERM (15 s drain).
 
 #### Event bus (RabbitMQ)
 
-`EventBusService` publishes and consumes through RabbitMQ (`internal/messaging`). Redis still
-stores events that have a TTL (`GetEvent`) and the per-session event streams. The topology is
+`EventBusService` publishes and consumes through RabbitMQ (`internal/messaging`). The topology is
 declared on startup and is idempotent:
 
 - `dozlab.events`: durable topic exchange; the routing key is the event type (e.g. `session.created`).
@@ -255,10 +250,6 @@ DB_PORT=5432
 DB_NAME=dozlab
 DB_USER=postgres
 DB_PASSWORD=password
-
-# Redis Configuration
-REDIS_HOST=localhost
-REDIS_PORT=6379
 
 # JWT Authentication
 JWT_SECRET=your-jwt-secret-key
@@ -383,17 +374,8 @@ rules, err := client.GetValidationRules(labID)
 client.SubmitValidationResult(result)
 ```
 
-### **Redis Pub/Sub** (Event-Driven)
-```go
-// Examiner publishes score update
-redis.PublishScoreUpdate(ctx, userID, labID, scoreData)
-
-// WebSocket subscribes to score updates
-redis.Subscribe(ctx, func(event RedisEvent) {
-    // Send real-time update to user
-    websocket.Send(event.Data)
-})
-```
+### **RabbitMQ** (Event-Driven)
+Events go through the `dozlab.events` topic exchange; see "Event bus (RabbitMQ)" above.
 
 ## 📁 Project Structure
 
@@ -407,7 +389,6 @@ cmd/
 │   ├── config.go
 │   ├── dto.go
 │   ├── api_client.go
-│   ├── redis_client.go
 │   └── config_test.go
 ├── worker/        # Background job processing
 ├── examiner/      # Auto-validation engine
@@ -435,7 +416,7 @@ COMMUNICATION_FLOWS.md   # Detailed architecture flows
 
 ### **True Microservice Benefits**
 - ✅ **Independent Deployment**: Each service scales separately
-- ✅ **No Shared Code**: Services communicate over HTTP/Redis only
+- ✅ **No Shared Code**: Services communicate over HTTP/RabbitMQ only
 - ✅ **Technology Freedom**: Each service can use different languages
 - ✅ **Fault Isolation**: One service failure doesn't crash others
 - ✅ **Team Independence**: Different teams can own different services
@@ -450,7 +431,7 @@ COMMUNICATION_FLOWS.md   # Detailed architecture flows
 
 ## 📚 Documentation
 
-- **[API Contracts](./api-contracts.md)**: HTTP endpoints and Redis events
+- **[API Contracts](./api-contracts.md)**: HTTP endpoints and events
 - **[Communication Flows](./COMMUNICATION_FLOWS.md)**: Detailed service interactions  
 - **[Progress Today](./progress.today)**: Development progress and roadmap
 
@@ -481,7 +462,7 @@ every stage, from `POST /api/v1/lab-sessions` to the VM answering SSH and the AP
 
 ```bash
 export KUBECONFIG=~/.kube/dozlab-local.yaml
-scripts/e2e-timing.sh up          # Postgres + Redis in Docker, migrations, RabbitMQ port-forward, API
+scripts/e2e-timing.sh up          # Postgres in Docker, migrations, RabbitMQ port-forward, API
 scripts/e2e-timing.sh run all     # vm and k8s labs (or: run vm / run k8s)
 scripts/e2e-timing.sh down
 ```

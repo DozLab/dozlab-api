@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -17,13 +16,6 @@ type DatabaseConfig struct {
 	Name     string
 	User     string
 	Password string
-}
-
-// RedisConfig holds Redis connection settings
-type RedisConfig struct {
-	URL  string
-	Host string
-	Port string
 }
 
 // RabbitMQConfig holds the RabbitMQ event bus settings
@@ -43,13 +35,7 @@ type Config struct {
 	CORSAllowedOrigins []string
 
 	Database DatabaseConfig
-	Redis    RedisConfig
 	RabbitMQ RabbitMQConfig
-
-	// Redis event bus settings
-	RedisAddr     string
-	RedisPassword string
-	RedisDB       int
 
 	// Microservice URLs
 	WebSocketServiceURL string
@@ -77,29 +63,15 @@ func Load() (*Config, error) {
 			User:     os.Getenv("DB_USER"),
 			Password: os.Getenv("DB_PASSWORD"),
 		},
-		Redis: RedisConfig{
-			URL:  os.Getenv("REDIS_URL"),
-			Host: os.Getenv("REDIS_HOST"),
-			Port: getEnv("REDIS_PORT", "6379"),
-		},
 		RabbitMQ: RabbitMQConfig{
 			URL: os.Getenv("RABBITMQ_URL"),
 		},
-		RedisAddr:           os.Getenv("REDIS_ADDR"),
-		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
 		WebSocketServiceURL: os.Getenv("WEBSOCKET_SERVICE_URL"),
 		ExaminerServiceURL:  os.Getenv("EXAMINER_SERVICE_URL"),
 		WorkflowServiceURL:  os.Getenv("WORKFLOW_SERVICE_URL"),
 	}
 
-	if cfg.RedisAddr == "" && cfg.Redis.Host != "" {
-		cfg.RedisAddr = net.JoinHostPort(cfg.Redis.Host, cfg.Redis.Port)
-	}
-
 	var err error
-	if cfg.RedisDB, err = getEnvInt("REDIS_DB", 0); err != nil {
-		return nil, err
-	}
 	if cfg.WorkerConcurrency, err = getEnvInt("WORKER_CONCURRENCY", 4); err != nil {
 		return nil, err
 	}

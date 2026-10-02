@@ -14,12 +14,12 @@ import (
 // TaskValidator handles task completion validation
 type TaskValidator struct {
 	db       *gorm.DB
-	eventBus *websocket.RedisEventBus
+	eventBus websocket.EventPublisher
 	engine   *ValidationEngine
 }
 
 // NewTaskValidator creates a new task validator
-func NewTaskValidator(db *gorm.DB, eventBus *websocket.RedisEventBus) *TaskValidator {
+func NewTaskValidator(db *gorm.DB, eventBus websocket.EventPublisher) *TaskValidator {
 	return &TaskValidator{
 		db:       db,
 		eventBus: eventBus,

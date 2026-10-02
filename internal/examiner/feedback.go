@@ -16,11 +16,11 @@ import (
 // FeedbackService handles real-time feedback and scoring
 type FeedbackService struct {
 	db       *gorm.DB
-	eventBus *websocket.RedisEventBus
+	eventBus websocket.EventPublisher
 }
 
 // NewFeedbackService creates a new feedback service
-func NewFeedbackService(db *gorm.DB, eventBus *websocket.RedisEventBus) *FeedbackService {
+func NewFeedbackService(db *gorm.DB, eventBus websocket.EventPublisher) *FeedbackService {
 	return &FeedbackService{
 		db:       db,
 		eventBus: eventBus,

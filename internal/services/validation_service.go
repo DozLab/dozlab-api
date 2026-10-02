@@ -55,7 +55,6 @@ func (s *validationService) ValidateEnvironmentVariables() error {
 		"DB_NAME",
 		"DB_USER", 
 		"DB_PASSWORD",
-		"REDIS_HOST",
 	}
 
 	var missing []string
@@ -72,7 +71,7 @@ func (s *validationService) ValidateEnvironmentVariables() error {
 	return nil
 }
 
-// ValidateConnectionStrings validates database and Redis connection strings
+// ValidateConnectionStrings validates the database connection string
 func (s *validationService) ValidateConnectionStrings() error {
 	// Validate database URL
 	if s.config.Database.URL == "" {
@@ -81,15 +80,6 @@ func (s *validationService) ValidateConnectionStrings() error {
 	
 	if _, err := url.Parse(s.config.Database.URL); err != nil {
 		return fmt.Errorf("invalid database URL: %w", err)
-	}
-
-	// Validate Redis URL
-	if s.config.Redis.URL == "" {
-		return fmt.Errorf("redis URL is empty")
-	}
-	
-	if _, err := url.Parse(s.config.Redis.URL); err != nil {
-		return fmt.Errorf("invalid redis URL: %w", err)
 	}
 
 	return nil
@@ -137,10 +127,6 @@ func (s *validationService) validateRequiredFields(cfg *config.Config) error {
 		return fmt.Errorf("database name is required")
 	}
 
-	if cfg.Redis.Host == "" {
-		return fmt.Errorf("redis host is required")
-	}
-
 	return nil
 }
 
@@ -149,10 +135,6 @@ func (s *validationService) validateNumericFields(cfg *config.Config) error {
 	// Validate port numbers
 	if port, err := strconv.Atoi(cfg.Database.Port); err != nil || port <= 0 || port > 65535 {
 		return fmt.Errorf("invalid database port: %s", cfg.Database.Port)
-	}
-
-	if port, err := strconv.Atoi(cfg.Redis.Port); err != nil || port <= 0 || port > 65535 {
-		return fmt.Errorf("invalid redis port: %s", cfg.Redis.Port)
 	}
 
 	if port, err := strconv.Atoi(cfg.ServerPort); err != nil || port <= 0 || port > 65535 {
@@ -220,8 +202,6 @@ func getConfigValue(cfg *config.Config, envVar string) string {
 		return cfg.Database.User
 	case "DB_PASSWORD":
 		return cfg.Database.Password
-	case "REDIS_HOST":
-		return cfg.Redis.Host
 	default:
 		return ""
 	}

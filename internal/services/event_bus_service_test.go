@@ -36,40 +36,21 @@ func (f *fakeTransport) Subscribe(ctx context.Context, types ...websocket.EventT
 	return nil
 }
 
-type fakeStore struct {
-	stored []*websocket.Event
-	err    error
-}
-
-func (f *fakeStore) StoreEvent(ctx context.Context, e *websocket.Event) error {
-	f.stored = append(f.stored, e)
-	return f.err
-}
-
-func (f *fakeStore) GetEvent(ctx context.Context, id string) (*websocket.Event, error) {
-	for _, e := range f.stored {
-		if e.ID == id {
-			return e, nil
-		}
-	}
-	return nil, errors.New("event not found")
-}
-
-func TestEventBusServicePublishStoresThenPublishes(t *testing.T) {
-	transport, store := &fakeTransport{}, &fakeStore{err: errors.New("redis down")}
-	svc := NewEventBusService(transport, store)
+func TestEventBusServicePublishEventPublishes(t *testing.T) {
+	transport := &fakeTransport{}
+	svc := NewEventBusService(transport)
 
 	event := &websocket.Event{ID: "e1", Type: websocket.EventSessionCreated}
 	if err := svc.PublishEvent(context.Background(), event); err != nil {
 		t.Fatalf("PublishEvent: %v", err)
 	}
-	if len(store.stored) != 1 || len(transport.published) != 1 || transport.published[0] != event {
-		t.Errorf("stored=%d published=%d; a store failure must not stop the publish", len(store.stored), len(transport.published))
+	if len(transport.published) != 1 || transport.published[0] != event {
+		t.Errorf("published = %v, want the event once", transport.published)
 	}
 }
 
 func TestEventBusServicePublishEventSwallowsErrors(t *testing.T) {
-	svc := NewEventBusService(&fakeTransport{failFirst: 1}, &fakeStore{})
+	svc := NewEventBusService(&fakeTransport{failFirst: 1})
 	if err := svc.PublishEvent(context.Background(), map[string]string{"k": "v"}); err != nil {
 		t.Errorf("non-critical publish returned %v, want nil", err)
 	}
@@ -87,7 +68,7 @@ func TestEventBusServicePublishCriticalEventRetries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := &fakeTransport{failFirst: tt.failFirst}
-			svc := NewEventBusService(transport, &fakeStore{})
+			svc := NewEventBusService(transport)
 			err := svc.PublishCriticalEvent(context.Background(), &websocket.Event{ID: "c1"})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("err = %v, wantErr %v", err, tt.wantErr)
@@ -96,9 +77,9 @@ func TestEventBusServicePublishCriticalEventRetries(t *testing.T) {
 	}
 }
 
-func TestEventBusServiceHandlersAndStore(t *testing.T) {
-	transport, store := &fakeTransport{}, &fakeStore{}
-	svc := NewEventBusService(transport, store)
+func TestEventBusServiceHandlers(t *testing.T) {
+	transport := &fakeTransport{}
+	svc := NewEventBusService(transport)
 
 	var got interface{}
 	svc.RegisterHandler("lab.started", func(ctx context.Context, e interface{}) error {
@@ -114,12 +95,5 @@ func TestEventBusServiceHandlersAndStore(t *testing.T) {
 	event := &websocket.Event{ID: "h1", Type: websocket.EventLabStarted}
 	if err := transport.handlers[websocket.EventLabStarted](context.Background(), event); err != nil || got != event {
 		t.Errorf("handler adapter: err=%v got=%v", err, got)
-	}
-
-	if err := svc.PublishEvent(context.Background(), event); err != nil {
-		t.Fatal(err)
-	}
-	if e, err := svc.GetEvent(context.Background(), "h1"); err != nil || e != event {
-		t.Errorf("GetEvent = %v, %v; want the stored event", e, err)
 	}
 }

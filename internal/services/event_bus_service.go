@@ -8,41 +8,25 @@ import (
 	"dozlab-backend/internal/websocket"
 )
 
-// EventTransport is the pub/sub transport behind EventBusService
-// (messaging.RabbitEventBus; websocket.RedisEventBus also satisfies it).
+// EventTransport is the pub/sub transport behind EventBusService (messaging.RabbitEventBus).
 type EventTransport interface {
 	Publish(ctx context.Context, event *websocket.Event) error
 	RegisterHandler(eventType websocket.EventType, handler websocket.EventHandler)
 	Subscribe(ctx context.Context, eventTypes ...websocket.EventType) error
 }
 
-// EventStore keeps events that have a TTL so they can be read back by ID.
-type EventStore interface {
-	StoreEvent(ctx context.Context, event *websocket.Event) error
-	GetEvent(ctx context.Context, eventID string) (*websocket.Event, error)
-}
-
 type eventBusService struct {
 	transport EventTransport
-	store     EventStore
 }
 
 // NewEventBusService creates a new event bus service with proper error handling
-func NewEventBusService(transport EventTransport, store EventStore) EventBusService {
-	return &eventBusService{
-		transport: transport,
-		store:     store,
-	}
+func NewEventBusService(transport EventTransport) EventBusService {
+	return &eventBusService{transport: transport}
 }
 
-// publish stores the event (if it has a TTL) and publishes it
+// publish converts event to a websocket.Event and publishes it
 func (s *eventBusService) publish(ctx context.Context, event interface{}) error {
-	e := websocket.ToEvent(event)
-	if err := s.store.StoreEvent(ctx, e); err != nil {
-		// Non-fatal: the event is still published
-		log.Printf("Warning: failed to store event %s: %v", e.ID, err)
-	}
-	return s.transport.Publish(ctx, e)
+	return s.transport.Publish(ctx, websocket.ToEvent(event))
 }
 
 // PublishEvent publishes an event with non-blocking error handling
@@ -96,16 +80,4 @@ func (s *eventBusService) Subscribe(ctx context.Context, eventTypes []string) er
 	}
 	
 	return s.transport.Subscribe(ctx, wsEventTypes...)
-}
-
-// GetEvent retrieves a stored event by ID
-func (s *eventBusService) GetEvent(ctx context.Context, eventID string) (interface{}, error) {
-	return s.store.GetEvent(ctx, eventID)
-}
-
-// ListEvents lists events with filters
-func (s *eventBusService) ListEvents(ctx context.Context, filters map[string]interface{}) ([]interface{}, error) {
-	// Implementation would depend on your specific Redis storage pattern
-	// This is a placeholder that would need to be implemented based on your event storage
-	return nil, fmt.Errorf("list events not implemented yet")
 }

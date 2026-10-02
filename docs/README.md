@@ -33,10 +33,6 @@ JWT_SECRET=your-jwt-secret-key-32-chars-min
 WEBSOCKET_SERVICE_URL=http://dozlab-websocket:8081
 EXAMINER_SERVICE_URL=http://dozlab-examiner:8083
 WORKFLOW_SERVICE_URL=http://dozlab-workflow:8084
-
-# Redis (optional - for caching/sessions)
-REDIS_ADDR=localhost:6379
-REDIS_PASSWORD=
 ```
 
 ## Directory Structure
@@ -69,7 +65,6 @@ docs/            # Documentation
 
 ### Microservice Integration
 - HTTP clients for other services
-- Redis for shared state/caching
 - Environment-based service discovery
 
 ## API Documentation

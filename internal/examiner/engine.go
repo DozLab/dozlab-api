@@ -22,11 +22,11 @@ import (
 // ValidationEngine handles automatic solution checking
 type ValidationEngine struct {
 	db       *gorm.DB
-	eventBus *websocket.RedisEventBus
+	eventBus websocket.EventPublisher
 }
 
 // NewValidationEngine creates a new validation engine
-func NewValidationEngine(db *gorm.DB, eventBus *websocket.RedisEventBus) *ValidationEngine {
+func NewValidationEngine(db *gorm.DB, eventBus websocket.EventPublisher) *ValidationEngine {
 	return &ValidationEngine{
 		db:       db,
 		eventBus: eventBus,
