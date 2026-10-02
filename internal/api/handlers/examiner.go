@@ -22,7 +22,7 @@ type ExaminerHandler struct {
 }
 
 // NewExaminerHandler creates a new examiner handler
-func NewExaminerHandler(db *database.Database, cfg *config.Config, eventBus *websocket.RedisEventBus) *ExaminerHandler {
+func NewExaminerHandler(db *database.Database, cfg *config.Config, eventBus websocket.EventPublisher) *ExaminerHandler {
 	return &ExaminerHandler{
 		db:               db,
 		cfg:              cfg,

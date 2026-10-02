@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"dozlab-backend/internal/clients"
 )
@@ -14,7 +13,6 @@ type ServiceClients struct {
 	websocketClient    *clients.HTTPClient
 	examinerClient     *clients.HTTPClient
 	workflowClient     *clients.HTTPClient
-	redisClient        *clients.RedisClient
 }
 
 // NewServiceClients creates service clients based on environment configuration
@@ -23,7 +21,6 @@ func NewServiceClients(config ServiceConfig) *ServiceClients {
 		websocketClient:  clients.NewHTTPClient(config.WebSocketServiceURL),
 		examinerClient:   clients.NewHTTPClient(config.ExaminerServiceURL),
 		workflowClient:   clients.NewHTTPClient(config.WorkflowServiceURL),
-		redisClient:      clients.NewRedisClient(config.RedisAddr, config.RedisPassword, config.RedisDB),
 	}
 }
 
@@ -32,9 +29,6 @@ type ServiceConfig struct {
 	WebSocketServiceURL   string
 	ExaminerServiceURL    string
 	WorkflowServiceURL    string
-	RedisAddr            string
-	RedisPassword        string
-	RedisDB              int
 }
 
 // WebSocket Service Communication
@@ -51,11 +45,7 @@ type NotificationRequest struct {
 // SendNotification sends a notification via WebSocket service
 func (s *ServiceClients) SendNotification(ctx context.Context, req NotificationRequest) error {
 	_, err := s.websocketClient.Post(ctx, "/notifications", req)
-	if err != nil {
-		// Fallback to Redis if WebSocket service is unavailable
-		return s.redisClient.PublishEvent(ctx, "notification", "api-service", req)
-	}
-	return nil
+	return err
 }
 
 // GetWebSocketStats retrieves WebSocket connection statistics
@@ -139,33 +129,4 @@ func (s *ServiceClients) GetWorkflowStatus(ctx context.Context, workflowID strin
 	var workflow WorkflowResponse
 	err = json.Unmarshal(resp, &workflow)
 	return &workflow, err
-}
-
-// Redis Pub/Sub Communication
-
-// PublishSessionEvent publishes a session-related event
-func (s *ServiceClients) PublishSessionEvent(ctx context.Context, eventType, sessionID string, data interface{}) error {
-	return s.redisClient.PublishEvent(ctx, eventType, "api-service", map[string]interface{}{
-		"session_id": sessionID,
-		"data":       data,
-	})
-}
-
-// Cache operations
-
-// CacheSessionData caches session data with TTL
-func (s *ServiceClients) CacheSessionData(ctx context.Context, sessionID string, data interface{}) error {
-	key := fmt.Sprintf("session:%s", sessionID)
-	return s.redisClient.Set(ctx, key, data, 30*time.Minute)
-}
-
-// GetCachedSessionData retrieves cached session data
-func (s *ServiceClients) GetCachedSessionData(ctx context.Context, sessionID string, dest interface{}) error {
-	key := fmt.Sprintf("session:%s", sessionID)
-	return s.redisClient.Get(ctx, key, dest)
-}
-
-// Close closes all client connections
-func (s *ServiceClients) Close() error {
-	return s.redisClient.Close()
 }

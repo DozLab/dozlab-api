@@ -259,29 +259,6 @@ deleted user gets 401.
 
 See `docs/decision.md`, "Enterprise readiness".
 
-## Redis Event Channels
-
-### Session Events
-- `session:created` - New session started
-- `session:expired` - Session timeout
-- `session:completed` - User finished lab
-
-### Task Events  
-- `task:started` - Task execution began
-- `task:completed` - Task finished successfully
-- `task:failed` - Task execution failed
-
-### Validation Events
-- `validation:started` - Validation process began
-- `validation:completed` - Validation finished
-- `score:updated` - User score changed
-
-### System Events
-- `job:queued` - New job added to queue
-- `job:processing` - Worker picked up job
-- `job:completed` - Job finished
-- `job:failed` - Job execution failed
-
 ## Authentication Flow
 
 1. **User login** → API Service validates → Returns JWT token
@@ -293,7 +270,7 @@ See `docs/decision.md`, "Enterprise readiness".
 
 - **API Service**: Owns all persistent data (PostgreSQL)
 - **Other Services**: Stateless, call API service for data
-- **Redis**: Temporary events and job queues only
+- **RabbitMQ**: Events between services (`dozlab.events`); nothing is kept there
 - **No shared models**: Each service defines its own DTOs
 
 ## ✅ Implementation Status

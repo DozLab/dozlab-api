@@ -3,7 +3,7 @@
 # POST /api/v1/lab-sessions -> LabSession -> controller -> pod -> VM ready -> API says running,
 # then DELETE -> pod, LabSession and the session's SSH key Secret gone.
 #
-#   scripts/e2e-timing.sh up     # Postgres + Redis in Docker, schema, RabbitMQ port-forward, API
+#   scripts/e2e-timing.sh up     # Postgres in Docker, schema, RabbitMQ port-forward, API
 #   scripts/e2e-timing.sh run [vm|k8s|all]   # per lab: time create -> running and delete -> gone
 #   scripts/e2e-timing.sh down   # stop the API and port-forward, remove the containers
 #
@@ -21,7 +21,7 @@ set -euo pipefail
 STATE="${E2E_STATE:-$HOME/.dozlab-e2e}"   # passwords, pids, logs; outside the repo
 TIMINGS="${TIMINGS:-$([[ -d $HOME/.dozlab-local ]] && echo "$HOME/.dozlab-local/timings.jsonl" || echo "$STATE/timings.jsonl")}"
 API_PORT="${API_PORT:-18080}"
-PG_PORT="${PG_PORT:-55432}" REDIS_PORT="${REDIS_PORT:-56379}" RABBIT_PORT="${RABBIT_PORT:-55672}"
+PG_PORT="${PG_PORT:-55432}" RABBIT_PORT="${RABBIT_PORT:-55672}"
 NS=default                 # the API creates LabSessions (and so lab pods) in "default"
 STAGE_TIMEOUT="${STAGE_TIMEOUT:-300}"   # seconds per stage before the run fails
 API="http://127.0.0.1:$API_PORT/api/v1"
@@ -62,11 +62,11 @@ up() {
   load_env
   local t
 
-  say "Postgres + Redis (Docker)"; t=$(now)
+  say "Postgres (Docker)"; t=$(now)
+  # dozlab-e2e-redis: left over from versions of this script that started Redis
   docker rm -f dozlab-e2e-pg dozlab-e2e-redis >/dev/null 2>&1 || true
   docker run -d --name dozlab-e2e-pg -e POSTGRES_PASSWORD="$PG_PASSWORD" -e POSTGRES_DB=dozlab \
     -p 127.0.0.1:$PG_PORT:5432 postgres:16-alpine >/dev/null
-  docker run -d --name dozlab-e2e-redis -p 127.0.0.1:$REDIS_PORT:6379 redis:7-alpine >/dev/null
   # Over TCP: on first start the image runs a temporary server on the Unix socket only, before
   # it creates the "dozlab" database; that one would pass a socket check too early.
   for _ in $(seq 60); do docker exec dozlab-e2e-pg pg_isready -q -h 127.0.0.1 -U postgres -d dozlab && break; sleep 0.5; done
@@ -89,7 +89,7 @@ SQL
 CREATE ROLE dozlab_api_audit LOGIN PASSWORD '$AUDIT_WRITER_PASSWORD' IN ROLE dozlab_audit_writer;
 CREATE ROLE dozlab_audit_admin LOGIN PASSWORD '$AUDIT_READER_PASSWORD' IN ROLE dozlab_audit_reader;
 SQL
-  record "up: postgres + redis + schema + audit store" "$t" "$(now)" ok
+  record "up: postgres + schema + audit store" "$t" "$(now)" ok
 
   say "RabbitMQ port-forward (cluster, namespace dozlab)"; t=$(now)
   alive portforward && kill "$(cat "$STATE/portforward.pid")" || true
@@ -106,7 +106,6 @@ SQL
   rp=$(kubectl -n dozlab get secret rabbitmq-credentials -o jsonpath='{.data.password}' | base64 -d)
   PORT=$API_PORT JWT_SECRET="$JWT_SECRET" \
     DB_HOST=127.0.0.1 DB_PORT=$PG_PORT DB_NAME=dozlab DB_USER=postgres DB_PASSWORD="$PG_PASSWORD" \
-    REDIS_HOST=127.0.0.1 REDIS_PORT=$REDIS_PORT \
     RABBITMQ_URL="amqp://$ru:$rp@127.0.0.1:$RABBIT_PORT/" \
     AUDIT_DATABASE_URL="postgres://dozlab_api_audit:$AUDIT_WRITER_PASSWORD@127.0.0.1:$PG_PORT/dozlab_audit?sslmode=disable" \
     AUDIT_READ_DATABASE_URL="postgres://dozlab_audit_admin:$AUDIT_READER_PASSWORD@127.0.0.1:$PG_PORT/dozlab_audit?sslmode=disable" \

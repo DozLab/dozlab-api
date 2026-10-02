@@ -28,9 +28,6 @@ func SetupRoutes(router *gin.Engine, db *database.Database, eventBus services.Ev
 		WebSocketServiceURL:  os.Getenv("WEBSOCKET_SERVICE_URL"),
 		ExaminerServiceURL:   os.Getenv("EXAMINER_SERVICE_URL"),
 		WorkflowServiceURL:   os.Getenv("WORKFLOW_SERVICE_URL"),
-		RedisAddr:           os.Getenv("REDIS_ADDR"),
-		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
-		RedisDB:             0, // Default to 0 for microservice
 	}
 	serviceClients := services.NewServiceClients(serviceConfig)
 

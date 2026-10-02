@@ -90,10 +90,6 @@ type EventBusService interface {
 	RegisterHandler(eventType string, handler func(ctx context.Context, event interface{}) error)
 	// Subscribe starts delivering events of eventTypes to their registered handlers.
 	Subscribe(ctx context.Context, eventTypes []string) error
-	// GetEvent returns the stored event with the given ID.
-	GetEvent(ctx context.Context, eventID string) (interface{}, error)
-	// ListEvents returns the stored events that match filters.
-	ListEvents(ctx context.Context, filters map[string]interface{}) ([]interface{}, error)
 }
 
 // ValidationService defines the interface for configuration validation
@@ -102,9 +98,9 @@ type ValidationService interface {
 	// numeric settings.
 	ValidateConfig(config interface{}) error
 	// ValidateEnvironmentVariables reports which required settings (JWT_SECRET, DB_HOST, DB_NAME,
-	// DB_USER, DB_PASSWORD, REDIS_HOST) are empty in the loaded config.
+	// DB_USER, DB_PASSWORD) are empty in the loaded config.
 	ValidateEnvironmentVariables() error
-	// ValidateConnectionStrings checks that the database and Redis URLs are set and parse.
+	// ValidateConnectionStrings checks that the database URL is set and parses.
 	ValidateConnectionStrings() error
 	// ValidateDependencies checks that the WebSocket, Examiner and Workflow service URLs are set
 	// and parse.
