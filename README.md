@@ -2,101 +2,46 @@
 
 A cloud-native educational platform with **Kubernetes sidecar architecture** for hands-on technical labs featuring real VM environments, integrated terminals, and VS Code access.
 
-## 🏗️ Architecture Overview
+## Architecture
 
-DozLab uses a **Kubernetes sidecar pattern** with microservice API managing multi-container lab environments:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/architecture-dark.png">
+  <img alt="DozLab architecture: the browser reaches Traefik on a single-node k3s cluster; Traefik sends /api to dozlab-api and each session's terminal and editor paths to its lab pod; dozlab-api writes to PostgreSQL and creates LabSessions; dozlab-controller creates the lab pods and publishes phase changes to RabbitMQ, which the API consumes" src="docs/diagrams/architecture.png">
+</picture>
 
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│  Web Browser    │────│  Load Balancer   │────│  DozLab API     │
-└─────────────────┘    └──────────────────┘    │  (Port 8080)    │
-                                               │                 │
-┌─────────────────┐                           │ • Authentication│
-│   VS Code Web   │────┐                      │ • Lab Management│
-└─────────────────┘    │                      │ • K8s Deployment│
-                       │                      │ • WebSocket Proxy│
-┌─────────────────┐    │                      └─────────────────┘
-│Web Terminal (WS)│────┘                               │
-└─────────────────┘                                   │
-                                                       ▼
-                                          ┌─────────────────────┐
-                                          │  Kubernetes Cluster │
-                                          │                     │
-    ┌─────────────────────────────────────│  Lab Session Pod    │─────────────────────────┐
-    │                                     │                     │                         │
-    │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
-    │  │  InitContainer  │  │   Main VM       │  │Terminal Sidecar │  │  VS Code        │ │
-    │  │  (IP Calculator)│  │(initrd/firecracker)│  │   (Port 8081)   │  │   Sidecar       │ │
-    │  │                 │  │   (Port 22)     │  │                 │  │  (Port 8080)    │ │
-    │  │ • Pod IP calc   │  │ • VM runner     │  │ • SSH to VM     │  │ • Code editing  │ │
-    │  │ • VM IP setup   │  │ • Firecracker   │  │ • WebSocket     │  │ • File browser  │ │
-    │  │ • Network config│  │ • User workload │  │ • Terminal I/O  │  │ • Integrated    │ │
-    │  └─────────────────┘  └─────────────────┘  └─────────────────┘  │   terminal      │ │
-    │                                                                 └─────────────────┘ │
-    │                                                                                     │
-    │  ┌─────────────────────────────────────────────────────────────────────────────┐   │
-    │  │                           Shared Volumes                                    │   │
-    │  │  • /shared/network-config (Pod/VM IP coordination)                         │   │
-    │  │  • /vm-data (VM filesystem access)                                         │   │
-    │  │  • /workspace (VS Code workspace)                                          │   │
-    │  └─────────────────────────────────────────────────────────────────────────────┘   │
-    └─────────────────────────────────────────────────────────────────────────────────────┘
-                                          │                     │
-                                          ▼                     ▼
-                                 ┌─────────────────┐   ┌──────────────────┐
-                                 │ Kubernetes      │   │ PostgreSQL       │
-                                 │ Service         │   │                  │
-                                 │ (Load Balancer) │   │                  │
-                                 │ • Port 8080     │   │ • Sessions       │
-                                 │ • Port 8081     │   │ • Lab specs      │
-                                 │ • Port 22       │   │ • User data      │
-                                 └─────────────────┘   └──────────────────┘
-```
+The browser loads the Nuxt frontend from GitHub Pages and reaches the cluster through Tailscale
+Funnel and Traefik. Traefik sends `/api` to this service, and each session's
+`/sessions/<id>/terminal` and `/sessions/<id>/vscode` straight to that session's pod.
 
-## 🚀 Sidecar Architecture Components
+- **dozlab-api** (this repo): JWT auth, access control, the audit log, and lab and session
+  records in PostgreSQL. To start a lab it creates a `LabSession` resource; it never builds pods.
+- **dozlab-controller** watches `LabSession`s. For each one it creates two PVCs, the SSH-key
+  Secret, the pod, a Service (`lab-service-<id>`) and an Ingress, then publishes each phase
+  change to RabbitMQ.
+- **The lab session pod** runs two init containers (`init-rootfs` writes the VM's root
+  filesystem, `network-setup` writes the VM's addresses), then three containers:
+  `firecracker-vm` runs the Firecracker microVM, unprivileged but with `NET_ADMIN`, `SYS_ADMIN`
+  and `SYS_RESOURCE` and with `/dev/kvm` and `/dev/net/tun` from the `dozlab.io/kvm` and
+  `dozlab.io/tun` resources; `terminal-sidecar` bridges a WebSocket to SSH on port 8081; and
+  `code-server` serves VS Code on port 8080.
+- **RabbitMQ** brings phase changes and notifications back to this service, which pushes them to
+  the browser on `/api/v1/ws` (see "Event bus" below).
 
-### **DozLab API Service** (Kubernetes Orchestrator)
-- **Lab Deployment**: Creates multi-container pods with sidecar architecture
-- **Kubernetes Integration**: Direct K8s API for pod/service management
-- **Authentication**: JWT-based security and session management
-- **WebSocket Proxy**: Routes terminal connections to sidecar containers
-- **Service Discovery**: Generates endpoints for all lab services
+### Starting a lab session
 
-### **Lab Session Pod** (Multi-Container Architecture)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/session-start-dark.png">
+  <img alt="Sequence of starting a lab session: the browser posts to dozlab-api, which creates a LabSession and answers 202; the controller creates the pod and marks the session Running with its URLs; the browser asks every 3 seconds until it gets the endpoints, then opens a terminal WebSocket to the pod" src="docs/diagrams/session-start.png">
+</picture>
 
-#### **Init Container** (Network Setup)
-- **IP Calculation**: Determines VM IP from pod IP
-- **Network Configuration**: Sets up shared network config for all containers
-- **Resource**: Lightweight busybox container
+`POST /api/v1/lab-sessions` checks that the caller may start the lab, refuses a second open
+session for the same lab (409), saves the session as pending, creates the `LabSession` and
+answers `202`. The controller does the rest. The frontend's workspace page then calls
+`GET /api/v1/lab-sessions/:id` every 3 seconds; each call reads the `LabSession`'s status from
+Kubernetes. Once the session is `Running` with its endpoints, the page opens the terminal
+WebSocket straight to the pod.
 
-#### **Main VM Container** (User Workload)
-- **Firecracker/initrd**: Runs actual user virtual machine
-- **Privileged Access**: Required for VM operations
-- **SSH Server**: Port 22 for direct VM access
-- **Resources**: 1-2 CPU, 3-4GB RAM
-
-#### **Terminal Sidecar** (Port 8081)
-- **SSH Proxy**: Connects to VM via internal SSH
-- **WebSocket Bridge**: Real-time terminal I/O over WebSocket
-- **Session Management**: Per-session terminal connections
-- **VM Discovery**: Auto-detects VM IP from shared config
-
-#### **VS Code Sidecar** (Port 8080)
-- **Code Server**: Web-based VS Code interface
-- **VM Integration**: Direct access to VM filesystem
-- **File Synchronization**: Real-time file editing
-- **Password Protected**: Auto-generated session passwords
-
-### **Kubernetes Services**
-- **Load Balancing**: Routes traffic to correct sidecar containers
-- **Service Discovery**: Consistent naming `lab-service-{SESSION_ID}`
-- **Port Mapping**: 8080→VS Code, 8081→Terminal, 22→SSH
-- **Session Isolation**: Each lab session gets dedicated service
-
-### **Shared Resources**
-- **Network Config**: Pod/VM IP coordination via shared volume
-- **VM Data**: VM filesystem accessible to VS Code
-- **Workspace**: Persistent user workspace data
+The diagrams in this README are PNGs in `docs/diagrams/`, in light and dark versions.
 
 ## 📋 Quick Start
 
@@ -142,7 +87,7 @@ Settings read by `cmd/api` (see `internal/config`):
 | `DB_SSLMODE` | `disable` | Used when `DATABASE_URL` is unset |
 | `RABBITMQ_URL` | — | Required; the server exits without it. AMQP URL of the event bus broker |
 | `RABBITMQ_PREFETCH` | `10` | Unacked deliveries per consumer |
-| `RABBITMQ_MAX_RETRIES` | `5` | Retries of a failed event before it goes to `dozlab.events.dlq` |
+| `RABBITMQ_MAX_RETRIES` | `5` | Retries of a failed event on the shared queue before it goes to `dozlab.events.dlq`. Nothing consumes the shared queue yet |
 | `RABBITMQ_RETRY_DELAY` | `10s` | Wait in the retry queue before redelivery. Changing it for an existing deployment requires deleting `dozlab.events.dozlab-api.retry` first (RabbitMQ rejects redeclaring a queue with different arguments) |
 | `KUBECONFIG` | `~/.kube/config` | In-cluster config is tried first. Without either, the server still starts but lab session routes are disabled |
 
@@ -150,17 +95,27 @@ The server shuts down gracefully on SIGINT/SIGTERM (15 s drain).
 
 #### Event bus (RabbitMQ)
 
-`EventBusService` publishes and consumes through RabbitMQ (`internal/messaging`). The topology is
-declared on startup and is idempotent:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/event-flow-dark.png">
+  <img alt="Event flow: the controller publishes phase changes and the API publishes notifications to the dozlab.events exchange, which copies each event into a queue per API process; that process's handler acks it and pushes it to the browser, or sends it to the dead-letter queue if handling fails" src="docs/diagrams/event-flow.png">
+</picture>
+
+`EventBusService` publishes and consumes through RabbitMQ (`internal/messaging`). The exchange and
+the DLQ are declared on startup, and each queue when something subscribes to it. Declaring is
+idempotent.
 
 - `dozlab.events`: durable topic exchange; the routing key is the event type (e.g. `session.created`).
-- `dozlab.events.dozlab-api`: durable quorum queue for this service, bound to the event types it subscribes to.
-- `dozlab.events.dozlab-api.retry`: failed messages wait here for `RABBITMQ_RETRY_DELAY`, then
-  dead-letter back to `dozlab.events` with key `retry.dozlab-api`, so they return only to this service.
 - `dozlab.events.dozlab-api.instance.<id>`: per-process queue for events every replica must see
-  (`SubscribeInstance`); see the notifications section below.
-- `dozlab.events.dlq`: messages that failed `RABBITMQ_MAX_RETRIES` times (headers
-  `x-dozlab-last-error`, `x-dozlab-consumer-group`, `x-dozlab-original-routing-key`).
+  (`SubscribeInstance`). This is the queue the API consumes today, for `notification` and
+  `labsession.phase_changed`; see the notifications section below.
+- `dozlab.events.dozlab-api`: durable quorum queue shared by this service's replicas
+  (`Subscribe`), with `dozlab.events.dozlab-api.retry`, where failed messages wait for
+  `RABBITMQ_RETRY_DELAY` and then dead-letter back to `dozlab.events` with key
+  `retry.dozlab-api`. Nothing calls `Subscribe` yet, so these two queues aren't declared and no
+  event is retried today.
+- `dozlab.events.dlq`: messages that failed (after `RABBITMQ_MAX_RETRIES` retries on the shared
+  queue, or at once on an instance queue), with headers `x-dozlab-last-error`,
+  `x-dozlab-consumer-group` and `x-dozlab-original-routing-key`.
 
 Messages are persistent and published with confirms; a delivery is acked only after its
 handlers succeed. The bus reconnects with backoff if the connection drops. Handlers may run
@@ -284,6 +239,16 @@ AUDIT_READS=false
 ```
 
 ### Access control and audit log
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/access-checks-dark.png">
+  <img alt="Flowchart of the access checks: a valid token, an active user whose role is read from the database, a role with the route's permission in the authz table, and for one record ownership or manage_any; each failed check ends in 401, 403 or 404" src="docs/diagrams/access-checks.png">
+</picture>
+
+A protected request passes four checks in order: a valid token (401), a user who still exists and
+is active, with the role read from the database on every request (401), a role that has the
+route's permission (403), and, in the handler, for one record, that it is the caller's own or the
+caller has the `manage_any` permission (403 for labs, 404 for sessions).
 
 - **Access control:** `internal/authz/authz.go` is the one table of which role has which
   permission, and `internal/api/routes.go` names the permission each route needs.
