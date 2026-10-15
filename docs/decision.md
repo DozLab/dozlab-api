@@ -1330,15 +1330,50 @@ Labs only ever boot on the node, which is the only place they can.
 | dozlab-api | `go build ./... && go vet ./... && go test ./...` | nothing yet: no Dockerfile (see below) |
 | dozlab-frontend | `npm ci && npm run lint && npm run build` | Pages deploy, as today |
 
+## Tags and labels (owner request, 2026-10-15)
+
+**Image tags.** Every image (`dozlab-controller`, `dozlab-terminal`, `dozlab-firecracker`,
+`dozlab-init-<lab>`) gets the same tags from `docker/metadata-action`:
+
+| Tag | When | Mutable | Used by |
+|---|---|---|---|
+| `main-<sha7>-<run>` | push to `main` | no | Flux: the ImagePolicy takes the highest run number |
+| `sha-<full sha>` | push to `main`, `v*` tag | no | finding the image built from a commit |
+| `1.2.3` | git tag `v1.2.3` | no | releases; a later production cluster can follow a semver range |
+| `1.2`, `1` | git tag `v1.2.3` (`1` not while the major is 0) | yes, moves to the newest patch / minor | people, not Flux |
+| `pr-<n>` | PR | not pushed | the build is only checked |
+
+No `latest`: Flux can't tell when a mutable tag changes, and it hides what runs.
+
+**Git tags.** `v<semver>` releases an app repo's image. `chart-v<semver>` releases the chart
+(dozlab-infra, already in place); a `chart-v*` tag doesn't match `v*`, so it doesn't build the
+Firecracker image.
+
+**Image labels.** The standard `org.opencontainers.image.*` labels: `title`, `description`,
+`url`, `source` (links the GHCR package to its repo), `version` (the tag above), `created`,
+`revision` (the commit), `licenses` where the repo has one, and `vendor=DozLab`. rootfs-manager
+builds through `make`, so `init-setup/Makefile` sets them.
+
+**Kubernetes labels.** The chart puts the recommended `app.kubernetes.io/*` labels on everything:
+`name`, `instance`, `component` (`controller`, `api`), `part-of=dozlab`, `managed-by=Helm`, and
+`version`, which is the component's **image tag**, so it shows what runs (`kubectl get pods
+-l app.kubernetes.io/part-of=dozlab -L app.kubernetes.io/version`). The CRD's `version` is the
+chart's. Selectors use only `name`, `instance` and `component`, so a new image never changes them.
+The adopted controller keeps its old selector `app: dozlab-controller`.
+
 ## Consequences
 
 - `~/dozlab.sh images` (build locally, `docker save | k3s ctr images import`) stops being how the
   cluster gets images; it stays useful for testing a branch before it merges.
 - The controller running today (`dozlab-system`, image `dozlab-controller:local`, applied from
-  `deploy/deployment.yaml`) and the LabSession CRD weren't made by Helm. Before the first
-  HelmRelease they must be adopted (Helm's ownership labels and annotations) or replaced. The
-  CRD must be adopted, not deleted: deleting it deletes every LabSession. This is a cluster write
-  the owner does.
+  `deploy/deployment.yaml`) and the LabSession CRD weren't made by Helm. **The owner chose to
+  adopt them** (Helm's ownership label and annotations), not delete and recreate them; deleting
+  the CRD would delete every LabSession. The chart keeps the old pod selector for this
+  (`controller.selectorLabels`). The labelling is a cluster write the owner does.
+- Labs pick their init image from `labs.init_image` in the API's database (`dozlab-init:local`
+  today). Flux can't change those rows, so those labs keep the locally imported images until the
+  rows point at `ghcr.io/dozlab/dozlab-init-<lab>`; the controller's default init image only
+  applies to labs without one.
 - Installing Flux (`flux bootstrap github`) is a cluster write and needs a GitHub token that can
   create a deploy key on `dozlab-fleet`; the owner runs it. Image automation needs that deploy key
   to be read-write.
@@ -1356,4 +1391,6 @@ moves the `/api` route from the host to Traefik, and sets `api.enabled: true`.
 1. Whether Flux also manages Postgres and RabbitMQ (`dozlab-infra/postgres.yaml`,
    `rabbitmq.yaml`), which are applied by `~/dozlab.sh` today. They hold data on PVCs, so Flux must
    never prune them.
-2. Adopt the existing controller and CRD, or remove the controller Deployment and let Helm create it.
+2. Decided (2026-10-15): adopt the existing controller and CRD.
+3. Who keeps `labs.init_image` pointing at the newest init image: the API (a setting), a
+   migration per release, or a semver tag that labs reference.
