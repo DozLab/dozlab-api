@@ -1279,3 +1279,81 @@ Cilium, or Canal to keep Flannel).
    default, and a change that can't be recorded is refused.
 3. Done (2026-10-01): instructors write specs only for their own labs; admins for any.
 4. Whether to test and add network policies on the local cluster.
+
+# Decision: CI on GitHub Actions, CD with Flux and the dozlab Helm chart
+
+- **Status:** accepted (2026-10-15, owner)
+- **Decision:** GitHub-hosted runners build, test and push images; they never run a lab. Flux,
+  running in the cluster, deploys the `dozlab` Helm chart and picks up new images on its own.
+
+## Context
+
+CI was parked on 2026-10-01 because the workflows couldn't be tested in a container runner.
+The reason underneath is that the lab images are Firecracker microVMs: they need `/dev/kvm`,
+and GitHub's hosted runners are themselves VMs with no KVM for Firecracker. Building an image
+works on a runner; **booting a lab doesn't**. So the work is split by what each side can do:
+
+```
+push / PR ──> GitHub Actions (hosted runner)
+               ├─ go build / vet / test, npm lint / build, shellcheck, helm lint
+               └─ on main: docker build + push ──> ghcr.io/dozlab/<image>:main-<sha>-<run>
+                                                         │
+k3s node (has KVM) ── Flux ◀── watches GHCR ─────────────┘
+               ├─ OCIRepository: oci://ghcr.io/dozlab/charts/dozlab (semver range)
+               ├─ ImagePolicy: newest main-<sha>-<run> per image
+               ├─ ImageUpdateAutomation: commits the new tag into dozlab-fleet
+               └─ HelmRelease: helm upgrade with those values ──> lab pods boot on the node
+```
+
+Labs only ever boot on the node, which is the only place they can.
+
+## Choices (owner, 2026-10-15)
+
+| Question | Chosen | Not chosen |
+|---|---|---|
+| Deploy tool | **Flux CD** | GitHub Actions deploying to the cluster: it would need a runner on the node or cluster credentials in GitHub |
+| What Flux deploys | **The `dozlab` Helm chart** (`dozlab-infra/helm/dozlab`), through a `HelmRelease` | Plain manifests (`deploy/deployment.yaml`, `kubectl apply` from `~/dozlab.sh`) |
+| Image registry | **GHCR**, `ghcr.io/dozlab/<image>`. Actions pushes with `GITHUB_TOKEN`; the repos are public, so the cluster needs no pull secret | Docker Hub (`dozman99/...`): needs a token secret per repo and has pull rate limits |
+| Where Flux gets the chart | **The OCI chart on GHCR** (`oci://ghcr.io/dozlab/charts/dozlab`), which `dozlab-infra`'s `helm-chart.yml` already publishes on a `chart-v<version>` tag. A chart change deploys only once it's tagged | A `GitRepository` on `dozlab-infra` `main`: every merged chart change would deploy straight away |
+| Where the Flux config lives | **A new repo, `DozLab/dozlab-fleet`**: the Flux bootstrap (`clusters/local/`), the HelmRelease and its values per cluster, the image policies | `dozlab-infra/clusters/`: Flux's tag-bump commits would land in the chart repo's history |
+| How a new image reaches the cluster | **Flux image automation.** CI tags images `main-<sha>-<run number>`; Flux picks the highest run number, commits that tag into the HelmRelease values in `dozlab-fleet`, and Helm upgrades. Every rollout is a commit, so a rollback is a `git revert` | Tags pinned by hand; a mutable `:main` tag (Flux can't tell it changed) |
+| First pass | **The controller only** (with the CRD and the lab pod images). `api.enabled: false` | Moving the API into the cluster now |
+
+## What CI does per repo
+
+| Repo | Every push and PR | On `main` also |
+|---|---|---|
+| dozlab-controller | `go build ./... && go vet ./... && go test ./...` | push `dozlab-controller` |
+| dozlab-terminal-sidecar | `go build ./... && go vet ./...`, `docker build` | push `dozlab-terminal` |
+| dozlab-infra | `shellcheck *.sh`, `docker build`; the chart workflow as today | push `dozlab-firecracker` |
+| dozlab-rootfs-manager | `shellcheck` on the scripts, `make build-init LAB=vm` | push `dozlab-init-vm` (and the other labs' init images) |
+| dozlab-api | `go build ./... && go vet ./... && go test ./...` | nothing yet: no Dockerfile (see below) |
+| dozlab-frontend | `npm ci && npm run lint && npm run build` | Pages deploy, as today |
+
+## Consequences
+
+- `~/dozlab.sh images` (build locally, `docker save | k3s ctr images import`) stops being how the
+  cluster gets images; it stays useful for testing a branch before it merges.
+- The controller running today (`dozlab-system`, image `dozlab-controller:local`, applied from
+  `deploy/deployment.yaml`) and the LabSession CRD weren't made by Helm. Before the first
+  HelmRelease they must be adopted (Helm's ownership labels and annotations) or replaced. The
+  CRD must be adopted, not deleted: deleting it deletes every LabSession. This is a cluster write
+  the owner does.
+- Installing Flux (`flux bootstrap github`) is a cluster write and needs a GitHub token that can
+  create a deploy key on `dozlab-fleet`; the owner runs it. Image automation needs that deploy key
+  to be read-write.
+- The chart has never been released; the first deploy needs a `chart-v<version>` tag.
+
+## Next: the API in the cluster
+
+The chart already has the API, but dozlab-api has no Dockerfile, runs on the host behind the
+Funnel (`~/dozlab-browser.sh`), and the chart's values still point it at Redis, which was removed
+(dozlab-api #29). A follow-up adds the Dockerfile and an image in CI, drops Redis from the chart,
+moves the `/api` route from the host to Traefik, and sets `api.enabled: true`.
+
+## Still to decide
+
+1. Whether Flux also manages Postgres and RabbitMQ (`dozlab-infra/postgres.yaml`,
+   `rabbitmq.yaml`), which are applied by `~/dozlab.sh` today. They hold data on PVCs, so Flux must
+   never prune them.
+2. Adopt the existing controller and CRD, or remove the controller Deployment and let Helm create it.
