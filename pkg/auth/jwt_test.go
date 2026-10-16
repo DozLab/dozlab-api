@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,10 +52,10 @@ func TestValidateToken(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "Valid refresh token",
+			name:    "Refresh token is not an access token",
 			token:   tokens.RefreshToken,
 			secret:  secret,
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name:    "Wrong secret",
@@ -152,4 +153,46 @@ func TestRefreshAccessToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Each token type is accepted only where it belongs, and a token without a type nowhere.
+func TestTokenTypes(t *testing.T) {
+	secret := "test-secret-key"
+	userID := uuid.New()
+	pair, err := GenerateTokenPair(userID, "u", "u@example.com", "student", secret)
+	require.NoError(t, err)
+
+	claims, err := ValidateToken(pair.AccessToken, secret)
+	require.NoError(t, err)
+	assert.Equal(t, TokenTypeAccess, claims.TokenType)
+	_, err = ValidateRefreshToken(pair.AccessToken, secret)
+	assert.ErrorIs(t, err, ErrWrongTokenType)
+
+	claims, err = ValidateRefreshToken(pair.RefreshToken, secret)
+	require.NoError(t, err)
+	assert.Equal(t, TokenTypeRefresh, claims.TokenType)
+	assert.Equal(t, userID, claims.UserID)
+	_, err = ValidateToken(pair.RefreshToken, secret)
+	assert.ErrorIs(t, err, ErrWrongTokenType)
+
+	// Signed with the right secret but without a type, as before types existed
+	untyped, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &JWTClaims{
+		UserID: userID, Username: "u", Role: "admin",
+		RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))},
+	}).SignedString([]byte(secret))
+	require.NoError(t, err)
+	_, err = ValidateToken(untyped, secret)
+	assert.ErrorIs(t, err, ErrWrongTokenType)
+	_, err = ValidateRefreshToken(untyped, secret)
+	assert.ErrorIs(t, err, ErrWrongTokenType)
+
+	// Only a refresh token refreshes
+	_, err = RefreshAccessToken(pair.AccessToken, secret)
+	assert.ErrorIs(t, err, ErrWrongTokenType)
+	_, err = RefreshAccessToken(untyped, secret)
+	assert.Error(t, err)
+	newPair, err := RefreshAccessToken(pair.RefreshToken, secret)
+	require.NoError(t, err)
+	_, err = ValidateToken(newPair.AccessToken, secret)
+	assert.NoError(t, err)
 }

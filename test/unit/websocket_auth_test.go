@@ -28,6 +28,13 @@ func wsTestToken(t *testing.T, userID uuid.UUID) string {
 	return tokens.AccessToken
 }
 
+func wsTestRefreshToken(t *testing.T) string {
+	t.Helper()
+	tokens, err := auth.GenerateTokenPair(uuid.New(), "wsuser", "ws@example.com", "student", wsTestSecret)
+	require.NoError(t, err)
+	return tokens.RefreshToken
+}
+
 // wsTestServer serves /ws like SetupRoutes does, with a running Manager.
 func wsTestServer(t *testing.T) (*httptest.Server, *websocket.Manager) {
 	t.Helper()
@@ -55,6 +62,8 @@ func TestWebSocketAuth_Rejects(t *testing.T) {
 		{"sentinel without token", http.Header{"Sec-Websocket-Protocol": {middleware.WebSocketSubprotocol}}},
 		{"token without sentinel", http.Header{"Sec-Websocket-Protocol": {valid}}},
 		{"invalid subprotocol token", http.Header{"Sec-Websocket-Protocol": {middleware.WebSocketSubprotocol + ", not-a-jwt"}}},
+		{"refresh token as bearer", http.Header{"Authorization": {"Bearer " + wsTestRefreshToken(t)}}},
+		{"refresh token in subprotocol", http.Header{"Sec-Websocket-Protocol": {middleware.WebSocketSubprotocol + ", " + wsTestRefreshToken(t)}}},
 		{"token signed with another secret", http.Header{"Authorization": {"Bearer " + func() string {
 			tokens, _ := auth.GenerateTokenPair(uuid.New(), "x", "x@example.com", "student", "another-secret-another-secret-32")
 			return tokens.AccessToken
