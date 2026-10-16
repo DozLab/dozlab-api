@@ -244,7 +244,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	claims, err := auth.ValidateToken(req.RefreshToken, os.Getenv("JWT_SECRET"))
+	claims, err := auth.ValidateRefreshToken(req.RefreshToken, os.Getenv("JWT_SECRET"))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error": "Invalid or expired refresh token",
